@@ -819,3 +819,330 @@ def process_document(uploaded_file, preserve_formatting, enhance_highlighting):
             status_text.empty()
             
             st.success("🎉 Document processed successfully!")
+            
+    except ValueError as ve:
+        st.error(f"❌ Processing Error: {str(ve)}")
+        logger.error(f"Processing error: {str(ve)}")
+    except Exception as e:
+        st.error(f"❌ Unexpected error occurred: {str(e)}")
+        st.write("Please try:")
+        st.write("• Uploading a different PDF file")
+        st.write("• Checking if the PDF is password-protected")
+        st.write("• Ensuring the PDF contains readable text")
+        logger.error(f"Unexpected error: {str(e)}")
+
+def calculate_quality_score(metadata):
+    """Calculate detection quality score based on metadata completeness."""
+    score = 0
+    total_fields = 6
+    
+    fields_to_check = [
+        'case_number', 'petitioner', 'respondent', 
+        'court_name', 'date', 'judge_signature'
+    ]
+    
+    for field in fields_to_check:
+        value = metadata.get(field, '')
+        if value and value not in ['Not detected', 'Unknown', 'Not specified', 'Petitioner', 'Respondent']:
+            score += 1
+    
+    # Special scoring for party names
+    if (metadata.get('petitioner', 'Petitioner') != 'Petitioner' and 
+        metadata.get('respondent', 'Respondent') != 'Respondent'):
+        score += 1  # Bonus point for both parties detected
+    
+    return int((score / (total_fields + 1)) * 100)
+
+def generate_summary_report():
+    """Generate a summary report of the processed judgment."""
+    try:
+        metadata = st.session_state.get('metadata', {})
+        stats = st.session_state.get('processing_stats', {})
+        
+        summary = f"""
+# Legal Judgment Processing Summary
+
+## Case Information
+- **Case Number**: {metadata.get('case_number', 'Not detected')}
+- **Petitioner**: {metadata.get('petitioner', 'Unknown')}
+- **Respondent**: {metadata.get('respondent', 'Unknown')}
+- **Court**: {metadata.get('court_name', 'Not specified')}
+- **Date**: {metadata.get('date', 'Not detected')}
+
+## Processing Statistics
+- **Text Length**: {stats.get('text_length', 0):,} characters
+- **Processing Time**: {stats.get('processing_time', 0):.2f} seconds
+- **File Size**: {stats.get('file_size', 0):,} bytes
+- **Quality Score**: {calculate_quality_score(metadata)}%
+
+## Generated On
+{datetime.now().strftime("%B %d, %Y at %I:%M %p")}
+        """
+        
+        st.download_button(
+            label="📊 Download Summary Report",
+            data=summary,
+            file_name=f"judgment_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            mime="text/markdown"
+        )
+        
+        st.success("✅ Summary report generated!")
+        
+    except Exception as e:
+        st.error(f"❌ Error generating summary: {str(e)}")
+
+def export_metadata_json():
+    """Export metadata as JSON file."""
+    try:
+        import json
+        
+        metadata = st.session_state.get('metadata', {})
+        stats = st.session_state.get('processing_stats', {})
+        
+        export_data = {
+            "metadata": metadata,
+            "processing_stats": stats,
+            "export_timestamp": datetime.now().isoformat(),
+            "quality_score": calculate_quality_score(metadata)
+        }
+        
+        json_str = json.dumps(export_data, indent=2, ensure_ascii=False)
+        
+        st.download_button(
+            label="📋 Download Metadata JSON",
+            data=json_str,
+            file_name=f"judgment_metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
+        
+        st.success("✅ Metadata JSON exported!")
+        
+    except Exception as e:
+        st.error(f"❌ Error exporting metadata: {str(e)}")
+
+def apply_custom_styling(custom_css):
+    """Apply custom CSS to the HTML output."""
+    try:
+        if 'html_output' in st.session_state:
+            html_content = st.session_state['html_output']
+            
+            # Insert custom CSS before closing </style> tag
+            custom_style = f"\n    /* Custom User Styles */\n    {custom_css}\n  </style>"
+            html_content = html_content.replace("</style>", custom_style)
+            
+            st.session_state['html_output'] = html_content
+            st.success("✅ Custom styling applied! Check the preview above.")
+            st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ Error applying custom styling: {str(e)}")
+
+def display_results():
+    """Display processing results with enhanced UI."""
+    st.markdown("---")
+    
+    # Metadata display
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown("### 📋 Extracted Metadata")
+        metadata = st.session_state['metadata']
+        
+        # Create a nice metadata display
+        metadata_items = [
+            ("📁 Case Number", metadata.get('case_number', 'Not detected')),
+            ("👤 Petitioner", metadata.get('petitioner', 'Unknown')),
+            ("👤 Respondent", metadata.get('respondent', 'Unknown')),
+            ("🏛️ Court", metadata.get('court_name', 'Not specified')),
+            ("📅 Date", metadata.get('date', 'Not detected')),
+            ("👨‍⚖️ Judge Present", metadata.get('judge_present', 'Not specified')),
+        ]
+        
+        for label, value in metadata_items:
+            if value and value not in ['Not detected', 'Unknown', 'Not specified', '']:
+                st.success(f"**{label}:** {value}")
+            else:
+                st.warning(f"**{label}:** {value}")
+    
+    with col2:
+        st.markdown("### 🎯 Processing Summary")
+        stats = st.session_state.get('processing_stats', {})
+        
+        # Create metrics display
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+        
+        with metric_col1:
+            st.metric(
+                label="📊 Text Characters",
+                value=f"{stats.get('text_length', 0):,}",
+                help="Total characters extracted from PDF"
+            )
+        
+        with metric_col2:
+            st.metric(
+                label="⏱️ Processing Time", 
+                value=f"{stats.get('processing_time', 0):.2f}s",
+                help="Time taken to process the document"
+            )
+        
+        with metric_col3:
+            st.metric(
+                label="📁 File Size",
+                value=f"{stats.get('file_size', 0):,} bytes",
+                help="Original PDF file size"
+            )
+        
+        # Quality indicators
+        st.markdown("#### 🎯 Detection Quality")
+        quality_score = calculate_quality_score(metadata)
+        
+        if quality_score >= 80:
+            st.success(f"🟢 Excellent detection quality ({quality_score}%)")
+        elif quality_score >= 60:
+            st.warning(f"🟡 Good detection quality ({quality_score}%)")
+        else:
+            st.error(f"🔴 Fair detection quality ({quality_score}%) - Manual review recommended")
+    
+    # HTML Preview and Download
+    st.markdown("### 📄 Enhanced Judgment Report")
+    
+    # Tabs for different views
+    tab1, tab2, tab3 = st.tabs(["🖥️ HTML Preview", "📝 Processed Text", "⚙️ Advanced Options"])
+    
+    with tab1:
+        st.markdown("#### Interactive Preview")
+        if 'html_output' in st.session_state:
+            # HTML preview with scroll
+            st.components.v1.html(
+                st.session_state['html_output'], 
+                height=800, 
+                scrolling=True
+            )
+            
+            # Download button
+            st.markdown(
+                create_download_button(
+                    st.session_state['html_output'], 
+                    f"legal_judgment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                ), 
+                unsafe_allow_html=True
+            )
+    
+    with tab2:
+        st.markdown("#### Processed Text Content")
+        if 'formatted_content' in st.session_state:
+            st.text_area(
+                "Formatted Content (for debugging)",
+                st.session_state['formatted_content'],
+                height=400,
+                help="This shows the processed text content before HTML rendering"
+            )
+    
+    with tab3:
+        st.markdown("#### Advanced Export Options")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📊 Generate Summary Report", use_container_width=True):
+                generate_summary_report()
+        
+        with col2:
+            if st.button("📋 Export Metadata JSON", use_container_width=True):
+                export_metadata_json()
+        
+        # Additional formatting options
+        st.markdown("##### 🎨 Custom Styling")
+        custom_css = st.text_area(
+            "Add Custom CSS (optional)",
+            placeholder="/* Add your custom CSS here */\n.content { font-size: 18px; }",
+            height=100
+        )
+        
+        if st.button("🎨 Apply Custom Styling") and custom_css:
+            apply_custom_styling(custom_css)
+
+# =====================
+#  STREAMLIT UI
+# =====================
+def main():
+    st.set_page_config(
+        page_title="Enhanced Legal Judgment Formatter", 
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    st.title("⚖️ Enhanced Legal Judgment Formatter")
+
+    
+    # Sidebar for additional options
+    with st.sidebar:
+        st.header("⚙️ Processing Options")
+        
+        preserve_formatting = st.checkbox("Preserve Original Formatting", value=True, 
+                                        help="Maintains original text structure and numbering")
+        
+        enhance_highlighting = st.checkbox("Enhanced Legal Highlighting", value=True,
+                                         help="Highlights citations, amounts, dates, and legal references")
+        
+        responsive_design = st.checkbox("Responsive Design", value=True,
+                                      help="Mobile-friendly layout")
+        
+        st.markdown("---")
+        st.markdown("### 📊 Processing Stats")
+        if 'processing_stats' in st.session_state:
+            stats = st.session_state['processing_stats']
+            st.metric("Pages Processed", stats.get('pages', 0))
+            st.metric("Text Length", f"{stats.get('text_length', 0):,} chars")
+            st.metric("Processing Time", f"{stats.get('processing_time', 0):.2f}s")
+    
+    # File upload
+    uploaded_file = st.file_uploader(
+        "📎 Upload Legal Judgment PDF", 
+        type=["pdf"],
+        help="Upload a PDF file containing a legal judgment for processing"
+    )
+    
+    if uploaded_file is not None:
+        st.success("✅ PDF uploaded successfully!")
+        
+        # Display file info
+        file_details = {
+            "Filename": uploaded_file.name,
+            "File Size": f"{uploaded_file.size:,} bytes",
+            "File Type": uploaded_file.type
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"📄 **{file_details['Filename']}**")
+        with col2:
+            st.info(f"📊 **{file_details['File Size']}**")
+        with col3:
+            st.info(f"🔧 **{file_details['File Type']}**")
+        
+        # Processing section
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            if st.button("🚀 Process Document", type="primary", use_container_width=True):
+                process_document(uploaded_file, preserve_formatting, enhance_highlighting)
+        
+        with col2:
+            if st.button("🔄 Reset", use_container_width=True):
+                # Clear session state
+                keys_to_clear = ['html_output', 'metadata', 'processing_stats', 'formatted_content']
+                for key in keys_to_clear:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
+    
+    # Results section
+    if 'metadata' in st.session_state:
+        display_results()
+
+# =====================
+#  MAIN EXECUTION
+# =====================
+if __name__ == "__main__":
+    main()
