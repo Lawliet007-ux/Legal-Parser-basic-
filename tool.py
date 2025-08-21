@@ -229,14 +229,7 @@ def download_button(html_content, filename):
 # =====================
 st.set_page_config(page_title="Enhanced Legal Judgment Formatter", layout="wide")
 st.title("⚖️ Enhanced Legal Judgment Formatter")
-st.markdown("""
-**Features:**
-- ✅ Preserves original numbering and sub-numbering
-- ✅ Maintains legal citations and case references  
-- ✅ Keeps original text formatting intact
-- ✅ Auto-detects case metadata (parties, court, date)
-- ✅ Highlights legal citations and case numbers
-""")
+
 
 pdf_file = st.file_uploader("Upload Legal Judgment PDF", type=["pdf"])
 
@@ -284,3 +277,4 @@ if 'html_output' in st.session_state:
         meta = st.session_state['meta']
         formatted_content = preserve_original_formatting(extract_text_from_pdf(pdf_file))
         st.text_area("Formatted Content", formatted_content, height=400)
+
