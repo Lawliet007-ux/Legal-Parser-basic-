@@ -683,7 +683,19 @@ def main():
     )
     
     st.title("⚖️ Enhanced Legal Judgment Formatter")
-  
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, #eff6ff, #dbeafe); padding: 20px; border-radius: 10px; margin-bottom: 30px;'>
+        <h3 style='color: #1e40af; margin-bottom: 15px;'>🔥 Advanced Features</h3>
+        <div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;'>
+            <div>✅ <strong>Smart Metadata Extraction</strong><br/>Auto-detects parties, court, dates</div>
+            <div>✅ <strong>Enhanced Text Processing</strong><br/>Preserves legal formatting & numbering</div>
+            <div>✅ <strong>Professional Styling</strong><br/>Modern, print-ready HTML output</div>
+            <div>✅ <strong>Legal Highlighting</strong><br/>Citations, amounts, dates, statutes</div>
+            <div>✅ <strong>Error Handling</strong><br/>Robust processing with detailed feedback</div>
+            <div>✅ <strong>Responsive Design</strong><br/>Mobile-friendly and accessible</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Sidebar for additional options
     with st.sidebar:
