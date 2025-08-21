@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import List, Tuple
 import re
 
-st.set_page_config(page_title="Judgment → HTML (improved layout)", layout="wide", page_icon="⚖️")
-st.title("Judgment → HTML — improved formatting & reduced right-gap")
+st.set_page_config(page_title="Judgment → HTML ", layout="wide", page_icon="")
+st.title("Judgment Parser")
 
 st.markdown(
     "This version attempts to reconstruct paragraphs (join broken lines), preserve numbering/sub-numbering, "
@@ -236,3 +236,4 @@ st.download_button("⬇️ Download improved HTML", data=final_html.encode("utf-
 
 st.info("If you still see uneven right-side gaps, try toggling 'Keep original lines' (shows exact extracted lines) "
         "and/or toggling 'Aggressive paragraph join'. For scanned PDFs, OCR first.")
+
