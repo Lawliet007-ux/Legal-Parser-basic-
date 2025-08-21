@@ -1,250 +1,137 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import io
-import re
+import html
 from datetime import datetime
-from typing import List, Tuple
+from typing import List
 
-# =====================
-#  APP CONFIG
-# =====================
-st.set_page_config(
-    page_title="Judgment → HTML (Original Layout)",
-    layout="wide",
-    page_icon="⚖️",
+st.set_page_config(page_title="Judgment → HTML (faithful extract)", layout="wide", page_icon="⚖️")
+
+st.title("Judgment → HTML — faithful text extraction")
+st.markdown(
+    "Uploads a judgment PDF and creates an HTML preserving **exact line breaks, numbering and sub-numbering**. "
+    "If the PDF is scanned (images only) you must OCR it first."
 )
 
-# =====================
-#  UTILS
-# =====================
-BODY_RE = re.compile(r"<body[^>]*>(.*?)</body>", re.DOTALL | re.IGNORECASE)
-STYLE_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.DOTALL | re.IGNORECASE)
-TITLE_RE = re.compile(r"<title>(.*?)</title>", re.DOTALL | re.IGNORECASE)
+st.sidebar.header("Options")
+preserve_nbsp = st.sidebar.checkbox("Keep non-breaking spaces (NBSP)", value=False,
+                                     help="If checked, NBSPs remain as \\u00A0; otherwise they convert to normal spaces.")
+remove_soft_hyphen = st.sidebar.checkbox("Remove soft-hyphen (\\u00AD)", value=True,
+                                         help="Soft-hyphens cause visual split words; removing them usually fixes broken words.")
+font_size = st.sidebar.slider("Font size in preview (px)", 12, 20, 14)
+mono = st.sidebar.checkbox("Use monospace font in preview", value=False)
+upload = st.file_uploader("Upload judgment PDF", type=["pdf"])
 
-
-def _extract_title(xhtml: str) -> str:
-    m = TITLE_RE.search(xhtml)
-    return (m.group(1).strip() if m else "Untitled Judgment")
-
-
-def _extract_body(xhtml: str) -> str:
-    m = BODY_RE.search(xhtml)
-    if m:
-        return m.group(1)
-    # As a fallback, just return the whole string
-    return xhtml
-
-
-def _extract_first_style_block(xhtml: str) -> str:
-    m = STYLE_RE.search(xhtml)
-    return m.group(0) if m else ""
-
-
-def page_to_xhtml(page: fitz.Page, preserve_ligatures: bool = True) -> str:
-    """Return PyMuPDF's XHTML for a page. This preserves layout best-in-class."""
-    flags = 0
-    # PyMuPDF exposes flags on TextPage. These names vary by version; calling without flags is fine.
-    try:
-        if preserve_ligatures:
-            flags = fitz.TEXT_PRESERVE_LIGATURES | getattr(fitz, "TEXT_PRESERVE_WHITESPACE", 0)
-    except Exception:
-        flags = 0
-    try:
-        return page.get_text("xhtml", flags=flags)
-    except Exception:
-        # Fallback to HTML if XHTML not available (older versions)
-        return page.get_text("html")
-
-
-def page_to_pre_text(page: fitz.Page) -> str:
-    """Return a <pre> wrapped plain-text extraction with whitespace preserved.
-    Useful when exact XHTML can't render well; numbering is still kept.
-    """
-    txt = page.get_text("text")
-    # Normalize Windows-style newlines
-    txt = txt.replace("\r\n", "\n")
-    return f"<pre class=\"prepage\">{st.utils.escape_markdown(txt, unsafe_allow_html=True)}</pre>"
-
-
-def build_full_html(
-    title: str,
-    page_html_snippets: List[str],
-    *,
-    include_page_frames: bool = True,
-    base_css: bool = True,
-    extra_header: str = "",
-) -> str:
-    """Compose a single self-contained HTML document from per-page XHTML bodies."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Optional CSS to keep things readable inside Streamlit iframe as well.
-    css = """
-    <style>
-      :root { --page-bg: #ffffff; --app-bg: #111; }
-      html, body { margin: 0; padding: 0; }
-      body { background: var(--page-bg); color: #111; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Noto Sans', 'Liberation Sans', sans-serif; }
-      .doc-meta { font: 12px/1.4 system-ui, sans-serif; color: #444; background: #f6f7f8; padding: 10px 14px; border-bottom: 1px solid #e5e7eb; }
-      .pagewrap { display: flex; justify-content: center; align-items: flex-start; }
-      .page-sep { height: 28px; }
-      /* Style for <pre> fallback pages */
-      .prepage { white-space: pre-wrap; font-family: 'Noto Serif', 'Georgia', serif; font-size: 14px; line-height: 1.5; margin: 12px auto; max-width: 900px; padding: 16px; box-sizing: border-box; }
-      /* Ensure PyMuPDF absolute elements are centered on large screens */
-      .pymupdf-page { margin: 0 auto; box-shadow: 0 0 0 rgba(0,0,0,0); }
-      @media (min-width: 1024px) {
-        .pymupdf-page { box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 10px 30px rgba(0,0,0,0.06); }
-      }
-    </style>
-    """ if base_css else ""
-
-    # Wrap each page body; PyMuPDF's XHTML already includes per-page wrappers.
-    frames = []
-    for idx, body in enumerate(page_html_snippets, start=1):
-        if include_page_frames:
-            frames.append(
-                f"""
-                <div class=\"pagewrap\">
-                  <section class=\"pymupdf-wrapper\" aria-label=\"Page {idx}\">
-                    {body}
-                  </section>
-                </div>
-                <div class=\"page-sep\"></div>
-                """
-            )
-        else:
-            frames.append(body)
-
-    pages_joined = "\n".join(frames)
-
-    html = f"""
-    <!doctype html>
-    <html lang=\"en\">
-    <head>
-      <meta charset=\"utf-8\" />
-      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-      <title>{title}</title>
-      {css}
-      {extra_header}
-    </head>
-    <body>
-      <div class=\"doc-meta\">Generated by Judgment → HTML tool on {now}</div>
-      {pages_joined}
-    </body>
-    </html>
-    """
-    # Lightweight fix: add a class to the PyMuPDF page container divs if present
-    html = html.replace('class="page"', 'class="page pymupdf-page"')
-    return html
-
-
-# =====================
-#  SIDEBAR
-# =====================
-st.sidebar.header("Extraction Settings")
-mode = st.sidebar.radio(
-    "Extraction fidelity",
-    ["Exact layout (XHTML)", "Text (preformatted)"],
-    help=(
-        "XHTML uses PyMuPDF's positioned text for near-visual fidelity."
-        " Preformatted text keeps all line breaks/numbering but reflows width."
-    ),
-)
-
-show_meta = st.sidebar.checkbox("Show generator header bar", value=True)
-center_pages = st.sidebar.checkbox("Center & elevate pages", value=True)
-
-st.title("⚖️ Judgment → HTML (Original Layout Preserver)")
-st.caption(
-    "Upload a legal judgment PDF. The app extracts the text while preserving original numbering, sub-numbering, and layout, and produces a single HTML file with a live preview."
-)
-
-# =====================
-#  FILE UPLOAD
-# =====================
-upload = st.file_uploader("Upload a Judgment PDF", type=["pdf"], accept_multiple_files=False)
-
-if upload is None:
-    st.info("⬆️ Drop a PDF above to begin. The preview and download will appear here.")
+if not upload:
+    st.info("Please upload a PDF to extract.")
     st.stop()
 
-# =====================
-#  PROCESS
-# =====================
-status = st.empty()
-progress = st.progress(0.0)
-
-# Read file bytes once and open with PyMuPDF
 pdf_bytes = upload.read()
 if not pdf_bytes:
-    st.error("The uploaded file appears to be empty.")
+    st.error("Uploaded file appears empty.")
     st.stop()
 
+def extract_lines_from_page(page: fitz.Page) -> List[str]:
+    """
+    Extract lines from a page by reading page.get_text('dict') and joining spans ordered by x position.
+    This preserves the reading order and keeps the original line breaks.
+    """
+    d = page.get_text("dict")
+    lines = []
+    for block in d.get("blocks", []):
+        if block.get("type") != 0:
+            # skip non-text blocks (images)
+            continue
+        for line in block.get("lines", []):
+            # sort spans by x0 (bbox[0]) to ensure left-to-right order
+            spans = sorted(line.get("spans", []), key=lambda s: s.get("bbox", [0,0,0,0])[0])
+            txt = "".join(s.get("text", "") for s in spans)
+            lines.append(txt)
+    return lines
+
+def normalize_line(s: str) -> str:
+    # Optionally remove soft-hyphen and normalize NBSP
+    if remove_soft_hyphen:
+        s = s.replace("\u00ad", "")  # soft hyphen removal
+    if not preserve_nbsp:
+        s = s.replace("\u00a0", " ")
+    # Some PDFs include weird control chars — remove isolated vertical tabs etc.
+    s = s.replace("\x0b", " ").replace("\r", "")
+    return s
+
+def page_to_pre_html(page: fitz.Page, page_index: int) -> str:
+    raw_lines = extract_lines_from_page(page)
+    cleaned = [normalize_line(ln) for ln in raw_lines]
+    page_text = "\n".join(cleaned).rstrip() + ("\n" if cleaned and not cleaned[-1].endswith("\n") else "")
+    esc = html.escape(page_text)
+    # Unique id per page
+    return f'<pre class="prepage" id="page{page_index}">{esc}</pre>'
+
+# Process file while keeping doc open (avoids 'document closed' race)
 try:
-    # Keep the document open until we've collected all pages
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        page_html_snippets = []
         n = doc.page_count
-        page_bodies: List[str] = []
-        title_collected = None
-
-        for i, page in enumerate(doc, start=1):
-            status.info(f"Extracting page {i}/{n} …")
-
-            if mode.startswith("Exact"):
-                xhtml = page_to_xhtml(page)
-                if i == 1:
-                    # First page title/style capture (optional)
-                    title_collected = _extract_title(xhtml)
-                    # Inline the first style block only once (PyMuPDF repeats per page)
-                    first_style = _extract_first_style_block(xhtml)
-                    extra_head = first_style
-                body = _extract_body(xhtml)
-                page_bodies.append(body)
-            else:
-                page_bodies.append(page_to_pre_text(page))
-
-            progress.progress(i / max(n, 1))
-
-        final_title = title_collected or (upload.name or "Judgment")
-        base_css = show_meta
-        extra_head = extra_head if mode.startswith("Exact") else ""
-        html = build_full_html(
-            title=final_title,
-            page_html_snippets=page_bodies,
-            include_page_frames=center_pages,
-            base_css=base_css,
-            extra_header=extra_head,
-        )
-
-    status.success("Extraction complete.")
-
+        progress = st.progress(0)
+        status = st.empty()
+        for i in range(n):
+            status.info(f"Extracting page {i+1}/{n} …")
+            page = doc.load_page(i)
+            page_html_snippets.append(page_to_pre_html(page, i+1))
+            progress.progress((i+1)/n)
+        status.success("Extraction finished.")
 except Exception as e:
     st.exception(e)
     st.stop()
 
-# =====================
-#  PREVIEW & DOWNLOAD
-# =====================
-st.subheader("Preview")
-# Use a tall iframe; the HTML is self-contained and scrollable
-st.components.v1.html(html, height=900, scrolling=True)
+# Compose final HTML
+title = (upload.name or "Judgment").rsplit(".", 1)[0]
+now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-st.download_button(
-    label="⬇️ Download HTML",
-    data=html.encode("utf-8"),
-    file_name=(upload.name.rsplit(".", 1)[0] + "_exact.html"),
-    mime="text/html",
-    help="Save the fully self-contained HTML that preserves the judgment layout.",
-)
+css_font = "monospace" if mono else "serif"
+css = f"""
+<style>
+  :root {{ --bg: #ffffff; --meta:#f6f7f8; }}
+  html,body{{ margin:0;padding:0;background:var(--bg);color:#111;font-family:{css_font}, Georgia, 'Times New Roman', serif; }}
+  .doc-meta{{font:12px/1.4 system-ui, sans-serif;color:#444;background:var(--meta);padding:10px 14px;border-bottom:1px solid #e5e7eb}}
+  .container{{padding:18px;}}
+  .prepage{{ white-space: pre-wrap; /* preserves line breaks and long lines wrap */ 
+            font-size: {font_size}px;
+            line-height: 1.45;
+            margin: 14px auto;
+            max-width: 980px;
+            padding: 14px;
+            box-sizing: border-box;
+            border: 0px solid transparent;
+          }}
+  /* small page separation */
+  .page-sep{{ height: 28px; }}
+</style>
+"""
 
-# =====================
-#  NOTES / TIPS
-# =====================
-with st.expander("Notes & tips"):
-    st.markdown(
-        """
-        - **Exact layout (XHTML)** uses PyMuPDF's absolute-positioned text to mimic the original PDF. This preserves **numbering, sub-numbering, line breaks, spacing**, and most formatting.
-        - **Text (preformatted)** gives a fast, robust plain-text view wrapped in `<pre>`, still keeping your original numbering/paragraph breaks.
-        - If your PDF is a **scanned image (no embedded text)**, you'll need to OCR it first (e.g., using OCRmyPDF or Tesseract) before this tool can extract text.
-        - The common *`document closed`* error is avoided here by keeping the PDF open inside a `with fitz.open(...):` block until all pages are processed.
-        - For best fidelity, install a Unicode serif font on your system (e.g., Noto Serif) so the browser can render legal glyphs nicely in the preview.
-        """
-    )
+pages_joined = "\n<div class='page-sep'></div>\n".join(page_html_snippets)
+final_html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>{html.escape(title)}</title>
+{css}
+</head>
+<body>
+  <div class="doc-meta">Generated by Judgment → HTML on {now} — source: {html.escape(upload.name or '')}</div>
+  <div class="container">
+    {pages_joined}
+  </div>
+</body>
+</html>
+"""
+
+# Preview in Streamlit (tall iframe)
+st.subheader("Preview (faithful)")
+st.components.v1.html(final_html, height=900, scrolling=True)
+
+# Download
+st.download_button("⬇️ Download faithful HTML", data=final_html.encode("utf-8"),
+                   file_name=f"{title}_faithful.html", mime="text/html")
+
+st.info("Notes: This method reconstructs **exact lines** from the PDF. If the PDF is scanned (image-only), run OCR first (e.g., OCRmyPDF).")
