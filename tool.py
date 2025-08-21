@@ -105,6 +105,12 @@ def extract_text_from_pdf(pdf_file):
     full_text = ""
     for page in doc:
         full_text += page.get_text()
+    
+    # Clean up encoding issues
+    full_text = full_text.replace('Â', ' ')
+    full_text = re.sub(r'\s+', ' ', full_text)  # Normalize whitespace
+    full_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', full_text)  # Normalize line breaks
+    
     return full_text
 
 def extract_metadata_enhanced(text):
@@ -120,9 +126,9 @@ def extract_metadata_enhanced(text):
     judge_present = ""
     judge_signature = ""
     
-    # Extract case number (usually at the top)
+    # Extract case number (more specific pattern)
     for i in range(min(5, len(lines))):
-        if re.search(r'(OMP|CRL|WP|CS|CC|CM|CRP|RCA|SLP|CA|MA|IA|MANU|AIR|SCC)', lines[i], re.IGNORECASE):
+        if re.match(r'^(OMP|CRL|WP|CS|CC|CM|CRP|RCA|SLP|CA|MA|IA)\s*\([^)]*\)\s*(Comm\.|Civil|Crl\.)?\s*No\.\s*\d+', lines[i], re.IGNORECASE):
             case_number = lines[i]
             break
     
@@ -130,8 +136,12 @@ def extract_metadata_enhanced(text):
     for i in range(min(15, len(lines))):
         line = lines[i]
         
+        # Skip case numbers and dates
+        if re.match(r'^(OMP|CRL|WP|CS|CC|CM)', line, re.IGNORECASE) or re.search(r'\d{2}\.\d{2}\.\d{4}', line):
+            continue
+            
         # Same line case
-        if re.search(r"\b(v\.|vs\.|versus|VS|V\.)\b", line, re.IGNORECASE):
+        if re.search(r"\b(v\.|vs\.|versus|VS|V\.)\b", line, re.IGNORECASE) and not line.lower().startswith('present'):
             parts = re.split(r"\b(v\.|vs\.|versus|VS|V\.)\b", line, flags=re.IGNORECASE)
             if len(parts) >= 3:
                 petitioner = parts[0].strip(" ,;:-")
@@ -147,28 +157,33 @@ def extract_metadata_enhanced(text):
     
     # Extract date (look for date patterns)
     date_pattern = r'\b(\d{1,2}[./]\d{1,2}[./]\d{4})\b'
-    for line in lines[:10]:
+    for line in lines[:15]:
         date_match = re.search(date_pattern, line)
         if date_match:
             date = date_match.group(1)
             break
     
-    # Extract court name
-    for line in lines[:20]:
-        if any(keyword in line.lower() for keyword in ['court', 'tribunal', 'commission']):
-            if len(line) > 5 and not re.search(r'\d', line):
+    # Extract court name (more specific)
+    court_keywords = ['district judge', 'high court', 'supreme court', 'tribunal', 'commercial court']
+    for line in lines[-10:]:  # Look at the end where judge signature is
+        for keyword in court_keywords:
+            if keyword in line.lower():
                 court_name = line
                 break
+        if court_name:
+            break
     
     # Extract judge present information
-    for line in lines[:20]:
+    for line in lines[:25]:
         if line.lower().startswith('present'):
             judge_present = line
             break
     
-    # Extract judge signature (usually at the end)
-    for line in reversed(lines[-20:]):
-        if any(keyword in line.lower() for keyword in ['judge', 'justice', 'magistrate']) and len(line.strip()) < 50:
+    # Extract judge signature (more specific - look for name patterns)
+    for line in reversed(lines[-15:]):
+        if (any(keyword in line.lower() for keyword in ['district judge', 'justice', 'magistrate']) 
+            and len(line.strip()) < 100 
+            and not line.lower().startswith('station')):
             judge_signature = line
             break
     
@@ -176,7 +191,7 @@ def extract_metadata_enhanced(text):
         "case_number": case_number,
         "petitioner": petitioner,
         "respondent": respondent,
-        "court_name": court_name or "Court",
+        "court_name": court_name or "District Court",
         "date": date,
         "judge_present": judge_present,
         "judge_signature": judge_signature
@@ -277,4 +292,3 @@ if 'html_output' in st.session_state:
         meta = st.session_state['meta']
         formatted_content = preserve_original_formatting(extract_text_from_pdf(pdf_file))
         st.text_area("Formatted Content", formatted_content, height=400)
-
