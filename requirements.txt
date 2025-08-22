@@ -1,3 +1,6 @@
 streamlit
 pymupdf
 jinja2
+PyPDF2 
+pdfplumber
+
