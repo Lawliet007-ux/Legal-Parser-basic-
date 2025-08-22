@@ -9,7 +9,7 @@ import unicodedata
 
 # Page configuration
 st.set_page_config(
-    page_title="Advanced Legal Text Extractor - Final",
+    page_title="Legal Text Extractor ",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -484,9 +484,9 @@ class AdvancedLegalExtractor:
         return processed_text, html_output
 
 def main():
-    st.title("🏛️ Advanced Legal Text Extractor - Premium Edition")
+    st.title("🏛️ Advanced Legal Text Extractor ")
     st.markdown("---")
-    st.markdown("**🚀 Aggressive paragraph reconstruction for premium results**")
+    st.markdown("")
     
     # Sidebar
     with st.sidebar:
@@ -498,22 +498,13 @@ def main():
             help="Choose the best method for your PDF quality"
         )
         
-        st.markdown("### 🎯 Revolutionary Approach")
+        st.markdown("")
         st.markdown("""
-        - **🔥 Aggressive Reconstruction**: Joins all related content
-        - **🧠 Smart Content Analysis**: Identifies document structure  
-        - **✨ Premium HTML**: Professional court document styling
-        - **🚫 Zero Fragmentation**: Eliminates broken lines
-        - **📄 Perfect Paragraphs**: Natural reading flow
         """)
         
-        st.markdown("### 🏆 Final Improvements")
+        st.markdown("### 🏆  ")
         st.markdown("""
-        - Complete paragraph reconstruction
-        - Intelligent content classification
-        - Premium typography and spacing
-        - Professional legal document format
-        - Print-ready output
+       
         """)
         
         st.warning("⚠️ This is the FINAL optimized version designed for top-notch results!")
@@ -555,13 +546,13 @@ def main():
                             
                             # Results
                             tab1, tab2, tab3 = st.tabs([
-                                "📝 Premium Text",
+                                "📝  Text",
                                 "🌐 Premium HTML",
                                 "💾 Downloads"
                             ])
                             
                             with tab1:
-                                st.subheader("🏆 Premium Processed Text")
+                                st.subheader("🏆  Processed Text")
                                 st.text_area(
                                     "Aggressively reconstructed premium text:",
                                     value=processed_text,
@@ -582,13 +573,13 @@ def main():
                                 st.components.v1.html(html_output, height=700, scrolling=True)
                             
                             with tab3:
-                                st.subheader("📥 Premium Downloads")
+                                st.subheader("📥  Downloads")
                                 
                                 col1, col2 = st.columns(2)
                                 
                                 with col1:
                                     st.download_button(
-                                        label="📄 Download Premium HTML",
+                                        label="📄 Download  HTML",
                                         data=html_output.encode('utf-8'),
                                         file_name=f"{uploaded_file.name.replace('.pdf', '')}_premium.html",
                                         mime="text/html",
@@ -597,7 +588,7 @@ def main():
                                 
                                 with col2:
                                     st.download_button(
-                                        label="📝 Download Premium Text",
+                                        label="📝 Premium Text",
                                         data=processed_text.encode('utf-8'),
                                         file_name=f"{uploaded_file.name.replace('.pdf', '')}_premium.txt",
                                         mime="text/plain",
@@ -620,3 +611,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
