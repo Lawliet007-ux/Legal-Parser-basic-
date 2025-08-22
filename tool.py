@@ -5,7 +5,7 @@ import pdfplumber
 import re
 from io import BytesIO
 import base64
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import unicodedata
 
 # Page configuration
@@ -27,6 +27,7 @@ class LegalJudgmentExtractor:
         text = text.replace('Â­', '-')  # Replace soft hyphen
         text = text.replace('\u00ad', '-')  # Replace soft hyphen
         text = text.replace('\ufeff', '')  # Remove BOM
+        text = text.replace('\u200b', '')  # Remove zero-width space
         
         # Normalize unicode
         text = unicodedata.normalize('NFKC', text)
@@ -34,13 +35,17 @@ class LegalJudgmentExtractor:
         return text
     
     def extract_text_pdfplumber(self, pdf_file) -> str:
-        """Extract text using pdfplumber - best for preserving layout"""
+        """Extract text using pdfplumber with better layout preservation"""
         try:
             with pdfplumber.open(pdf_file) as pdf:
                 full_text = ""
                 for page_num, page in enumerate(pdf.pages):
-                    # Get text with layout preservation
-                    text = page.extract_text(layout=True, x_tolerance=2, y_tolerance=2)
+                    # Extract text with layout settings optimized for legal documents
+                    text = page.extract_text(
+                        layout=True, 
+                        x_tolerance=3,  # Slightly more tolerance for character spacing
+                        y_tolerance=3   # Better line detection
+                    )
                     if text:
                         full_text += text
                         if page_num < len(pdf.pages) - 1:
@@ -87,92 +92,152 @@ class LegalJudgmentExtractor:
             st.error(f"Error with PyPDF2: {str(e)}")
             return ""
     
-    def normalize_spacing(self, text: str) -> str:
-        """Normalize spacing while preserving document structure"""
+    def reconstruct_paragraphs(self, text: str) -> str:
+        """Intelligently reconstruct paragraphs from fragmented lines"""
         lines = text.split('\n')
-        normalized_lines = []
+        reconstructed_lines = []
+        current_paragraph = []
         
-        for line in lines:
-            # Preserve completely empty lines
-            if not line.strip():
-                normalized_lines.append("")
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Handle empty lines
+            if not line:
+                if current_paragraph:
+                    reconstructed_lines.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                reconstructed_lines.append('')
+                i += 1
                 continue
             
-            # Count leading spaces for indentation
-            leading_spaces = len(line) - len(line.lstrip())
+            # Handle special markers
+            if '[PAGE_BREAK]' in line:
+                if current_paragraph:
+                    reconstructed_lines.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                reconstructed_lines.append(line)
+                i += 1
+                continue
             
-            # Clean internal spacing but preserve structure
-            cleaned_content = ' '.join(line.split())
+            # Detect different line types
+            line_type = self.get_line_type(line)
             
-            # Restore appropriate indentation (convert to standard units)
-            if leading_spaces > 0:
-                # Convert to reasonable indentation levels
-                indent_level = min(leading_spaces // 4, 8)  # Max 8 levels
-                cleaned_line = '    ' * indent_level + cleaned_content
-            else:
-                cleaned_line = cleaned_content
+            # Lines that should stand alone
+            if line_type in ['case_number', 'header', 'date', 'present', 'numbering', 'signature', 'page_marker']:
+                if current_paragraph:
+                    reconstructed_lines.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                reconstructed_lines.append(line)
+                i += 1
+                continue
             
-            normalized_lines.append(cleaned_line)
+            # Regular paragraph text
+            if line_type == 'paragraph':
+                # Check if this line continues from the previous
+                if current_paragraph and not line[0].isupper():
+                    # Likely continuation of previous sentence
+                    current_paragraph.append(line)
+                else:
+                    # Start of new paragraph or sentence
+                    if current_paragraph:
+                        reconstructed_lines.append(' '.join(current_paragraph))
+                    current_paragraph = [line]
+            
+            i += 1
         
-        return '\n'.join(normalized_lines)
+        # Handle any remaining paragraph
+        if current_paragraph:
+            reconstructed_lines.append(' '.join(current_paragraph))
+        
+        return '\n'.join(reconstructed_lines)
     
-    def detect_content_type(self, line: str) -> str:
-        """Detect the type of content in a line"""
+    def get_line_type(self, line: str) -> str:
+        """Determine the type of a text line"""
         stripped = line.strip()
         
         if not stripped:
             return "empty"
         
-        # Page break
-        if "[PAGE_BREAK]" in line:
-            return "page-break"
+        # Case number
+        if re.match(r'[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', stripped):
+            return "case_number"
         
-        # Case number patterns
-        if re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', stripped):
-            return "case-number"
-        
-        # Date patterns
+        # Date
         if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
             return "date"
         
-        # Present/Heard pattern
-        if re.match(r'^Present\s*:', stripped, re.IGNORECASE):
+        # Present statement
+        if stripped.startswith('Present'):
             return "present"
         
-        # Roman numerals in parentheses
-        if re.match(r'^\s*\([ivxlcdm]+\)', stripped, re.IGNORECASE):
-            return "roman-numbering"
+        # Page markers like :2:, :3:
+        if re.match(r'^:\d+:$', stripped):
+            return "page_marker"
         
-        # Alphabetic numbering in parentheses
-        if re.match(r'^\s*\([a-z]\)', stripped):
-            return "alpha-numbering"
+        # Numbering patterns
+        if re.match(r'^\([ivxlcdm]+\)\s+', stripped, re.IGNORECASE):
+            return "numbering"
+        if re.match(r'^\([a-z]\)\s+', stripped):
+            return "numbering"
+        if re.match(r'^\d+\.\s+', stripped):
+            return "numbering"
+        if re.match(r'^\d+\.\d+', stripped):
+            return "numbering"
         
-        # Main decimal numbering
-        if re.match(r'^\s*\d+\.(\d+\.)*\s+', line):
-            return "decimal-numbering"
-        
-        # Simple numbering
-        if re.match(r'^\s*\d+\.\s+', line):
-            return "main-numbering"
-        
-        # Judge signature patterns
-        if any(term in stripped.upper() for term in ['DISTRICT JUDGE', 'JUDGE', 'MAGISTRATE']):
-            return "signature"
-        
-        # Court/location info
-        if re.search(r'(Court|District|New Delhi)', stripped) and any(c.isupper() for c in stripped):
-            return "signature"
-        
-        # All caps names (likely judge names)
-        if len(stripped) > 10 and stripped.isupper() and ' ' in stripped:
-            return "signature"
-        
-        # Header detection (party names with VS)
+        # Headers (party names with VS)
         if ' VS ' in stripped.upper() or ' V/S ' in stripped.upper():
             return "header"
         
-        # Default paragraph
+        # Signatures (judge names, courts, etc.)
+        if any(term in stripped.upper() for term in ['JUDGE', 'COURT', 'DISTRICT', 'MAGISTRATE']):
+            return "signature"
+        
+        # All caps names (likely signatures)
+        if len(stripped) > 8 and stripped.replace(' ', '').isalpha() and stripped.isupper():
+            return "signature"
+        
         return "paragraph"
+    
+    def normalize_spacing(self, text: str) -> str:
+        """Improved spacing normalization"""
+        # First reconstruct paragraphs
+        reconstructed = self.reconstruct_paragraphs(text)
+        
+        lines = reconstructed.split('\n')
+        normalized_lines = []
+        
+        for line in lines:
+            if not line.strip():
+                normalized_lines.append("")
+                continue
+            
+            line_type = self.get_line_type(line)
+            
+            # Different handling based on line type
+            if line_type in ['case_number', 'header', 'date', 'signature']:
+                # Center-align these by removing excessive leading spaces
+                cleaned = ' '.join(line.split())
+                normalized_lines.append(cleaned)
+            elif line_type == 'numbering':
+                # Preserve some indentation for numbering
+                # Detect the numbering part and content
+                match = re.match(r'^(\s*\([ivxlcdm]+\)\s*|\s*\([a-z]\)\s*|\s*\d+\.\s*)', line, re.IGNORECASE)
+                if match:
+                    numbering_part = match.group(1).strip()
+                    content_part = line[match.end():].strip()
+                    if content_part:
+                        normalized_lines.append(f"    {numbering_part} {content_part}")
+                    else:
+                        normalized_lines.append(f"    {numbering_part}")
+                else:
+                    normalized_lines.append(f"    {' '.join(line.split())}")
+            else:
+                # Regular paragraphs
+                cleaned = ' '.join(line.split())
+                normalized_lines.append(cleaned)
+        
+        return '\n'.join(normalized_lines)
     
     def convert_to_html(self, text: str) -> str:
         """Convert text to well-formatted HTML"""
@@ -187,35 +252,36 @@ class LegalJudgmentExtractor:
     <style>
         body {
             font-family: 'Times New Roman', Times, serif;
-            line-height: 1.5;
+            line-height: 1.6;
             margin: 0;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #f5f5f5;
             color: #000000;
             font-size: 14px;
         }
         
         .judgment-container {
-            max-width: 900px;
+            max-width: 210mm;
             margin: 0 auto;
-            padding: 30px;
+            padding: 25mm;
             background: white;
-            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            box-shadow: 0 0 15px rgba(0,0,0,0.1);
             border: 1px solid #ddd;
+            min-height: 297mm;
         }
         
         .case-number {
             text-align: center;
             font-weight: bold;
             font-size: 16px;
-            margin: 20px 0 10px 0;
+            margin: 15px 0;
         }
         
         .header {
             text-align: center;
             font-weight: bold;
             font-size: 16px;
-            margin: 10px 0 20px 0;
+            margin: 15px 0 25px 0;
             border-bottom: 2px solid #000;
             padding-bottom: 15px;
         }
@@ -223,75 +289,71 @@ class LegalJudgmentExtractor:
         .date {
             text-align: center;
             font-weight: bold;
-            margin: 15px 0;
+            margin: 20px 0;
         }
         
         .present {
-            margin: 15px 0;
+            margin: 20px 0;
             font-weight: bold;
         }
         
-        .main-numbering, .decimal-numbering {
-            margin: 20px 0 10px 0;
+        .numbering {
+            margin: 15px 0 8px 0;
             font-weight: bold;
-        }
-        
-        .roman-numbering {
-            margin: 10px 0 5px 20px;
-            font-weight: bold;
-        }
-        
-        .alpha-numbering {
-            margin: 8px 0 5px 40px;
         }
         
         .paragraph {
-            margin: 8px 0;
+            margin: 12px 0;
             text-align: justify;
-            text-indent: 0;
+            line-height: 1.8;
         }
         
         .signature {
             text-align: center;
             font-weight: bold;
-            margin: 30px 0 5px 0;
+            margin: 25px 0 8px 0;
+        }
+        
+        .page-marker {
+            text-align: center;
+            font-weight: bold;
+            margin: 20px 0;
+            font-size: 18px;
         }
         
         .page-break {
             page-break-before: always;
-            border-top: 2px dashed #666;
-            margin: 40px 0;
-            padding-top: 20px;
+            border-top: 3px double #333;
+            margin: 50px 0 30px 0;
+            padding-top: 30px;
             text-align: center;
             color: #666;
             font-style: italic;
+            font-size: 12px;
         }
         
-        .empty-line {
-            height: 12px;
+        .spacing {
+            height: 20px;
         }
         
-        /* Preserve indentation */
-        .indented {
-            padding-left: 20px;
-        }
-        
-        .indented-2 {
-            padding-left: 40px;
-        }
-        
-        .indented-3 {
-            padding-left: 60px;
-        }
-        
-        /* Print styles */
+        /* Enhanced print styles */
         @media print {
-            body { margin: 0; }
+            body { 
+                margin: 0; 
+                background: white;
+            }
             .judgment-container { 
                 box-shadow: none; 
                 border: none; 
                 margin: 0; 
-                padding: 20px; 
+                padding: 20px;
+                min-height: auto;
+            }
+            .page-break {
+                border-top: none;
+                margin: 20px 0;
+                font-size: 0;
+                height: 0;
             }
         }
     </style>
@@ -300,36 +362,43 @@ class LegalJudgmentExtractor:
     <div class="judgment-container">''']
         
         consecutive_empty = 0
+        last_was_numbering = False
         
         for line in lines:
-            content_type = self.detect_content_type(line)
+            stripped = line.strip()
             
-            if content_type == "empty":
+            # Handle empty lines with better logic
+            if not stripped:
                 consecutive_empty += 1
-                if consecutive_empty <= 2:  # Limit consecutive empty lines
-                    html_content.append('<div class="empty-line"></div>')
+                if consecutive_empty == 1:  # Only first empty line
+                    html_content.append('<div class="spacing"></div>')
                 continue
             else:
                 consecutive_empty = 0
             
-            if content_type == "page-break":
-                html_content.append('<div class="page-break">--- Page Break ---</div>')
+            # Handle page breaks
+            if '[PAGE_BREAK]' in line:
+                html_content.append('<div class="page-break">--- New Page ---</div>')
                 continue
             
-            # Process the line content
-            escaped_line = line.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+            # Detect content type
+            line_type = self.get_line_type(stripped)
             
-            # Handle indentation
-            indent_class = ""
-            if line.startswith('        '):
-                indent_class = " indented-3"
-            elif line.startswith('    '):
-                indent_class = " indented-2" if content_type in ["roman-numbering", "alpha-numbering"] else " indented"
+            # Escape HTML characters
+            escaped_line = stripped.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
             
-            # Generate HTML based on content type
-            css_class = content_type + indent_class
+            # Apply appropriate CSS class
+            css_class = line_type
+            
+            # Special handling for numbering continuation
+            if line_type == 'paragraph' and last_was_numbering:
+                # Check if this looks like continuation of numbering
+                if not re.match(r'^[A-Z]', stripped):  # Doesn't start with capital
+                    escaped_line = f"        {escaped_line}"  # Add extra indentation
             
             html_content.append(f'<div class="{css_class}">{escaped_line}</div>')
+            
+            last_was_numbering = (line_type == 'numbering')
         
         html_content.append('''    </div>
 </body>
@@ -337,10 +406,28 @@ class LegalJudgmentExtractor:
         
         return '\n'.join(html_content)
     
-    def generate_statistics(self, text: str) -> dict:
-        """Generate comprehensive statistics about the document"""
+    def generate_statistics(self, text: str) -> Dict:
+        """Generate comprehensive document statistics"""
         lines = text.split('\n')
         words = text.split()
+        
+        # Count different types of content
+        content_counts = {
+            'case_number': 0,
+            'header': 0,
+            'date': 0,
+            'present': 0,
+            'numbering': 0,
+            'paragraph': 0,
+            'signature': 0,
+            'page_marker': 0
+        }
+        
+        for line in lines:
+            if line.strip():
+                line_type = self.get_line_type(line.strip())
+                if line_type in content_counts:
+                    content_counts[line_type] += 1
         
         stats = {
             'total_lines': len(lines),
@@ -348,12 +435,9 @@ class LegalJudgmentExtractor:
             'total_words': len(words),
             'total_characters': len(text),
             'pages': text.count('[PAGE_BREAK]') + 1,
-            'numbering_patterns': {
-                'main_numbering': len(re.findall(r'^\s*\d+\.\s+', text, re.MULTILINE)),
-                'roman_numbering': len(re.findall(r'^\s*\([ivxlcdm]+\)', text, re.MULTILINE | re.IGNORECASE)),
-                'alpha_numbering': len(re.findall(r'^\s*\([a-z]\)', text, re.MULTILINE)),
-                'decimal_numbering': len(re.findall(r'^\s*\d+\.\d+', text, re.MULTILINE))
-            }
+            'content_breakdown': content_counts,
+            'avg_words_per_line': len(words) / max(len([l for l in lines if l.strip()]), 1),
+            'numbering_items': content_counts['numbering']
         }
         
         return stats
@@ -362,7 +446,7 @@ class LegalJudgmentExtractor:
         """Process PDF and return formatted text and HTML"""
         pdf_file.seek(0)
         
-        # Extract text
+        # Extract text based on method
         if extraction_method == "PDFPlumber (Recommended)":
             extracted_text = self.extract_text_pdfplumber(pdf_file)
         elif extraction_method == "PyMuPDF":
@@ -373,7 +457,7 @@ class LegalJudgmentExtractor:
         if not extracted_text:
             return "", ""
         
-        # Normalize spacing
+        # Normalize spacing and structure
         formatted_text = self.normalize_spacing(extracted_text)
         
         # Convert to HTML
@@ -384,115 +468,154 @@ class LegalJudgmentExtractor:
 def main():
     st.title("⚖️ Legal Judgment Text Extractor")
     st.markdown("---")
-    st.markdown("**Extract and preserve the formatting of legal judgments from PDF files**")
+    st.markdown("**Professional extraction and formatting of legal judgments from PDF files**")
     
     # Sidebar
-    st.sidebar.header("📋 Extraction Settings")
-    
-    extraction_method = st.sidebar.selectbox(
-        "Choose Extraction Method:",
-        ["PDFPlumber (Recommended)", "PyMuPDF", "PyPDF2"],
-        help="PDFPlumber provides the best balance of accuracy and formatting preservation"
-    )
-    
-    # Advanced options
-    st.sidebar.markdown("### Advanced Options")
-    preserve_original_spacing = st.sidebar.checkbox(
-        "Preserve Original Spacing", 
-        value=False,
-        help="Keep exact spacing from PDF (may result in uneven formatting)"
-    )
+    with st.sidebar:
+        st.header("📋 Settings")
+        
+        extraction_method = st.selectbox(
+            "Extraction Method:",
+            ["PDFPlumber (Recommended)", "PyMuPDF", "PyPDF2"],
+            help="Choose the PDF text extraction method"
+        )
+        
+        st.markdown("### Features")
+        st.markdown("""
+        ✅ **Smart paragraph reconstruction**
+        ✅ **Proper content classification** 
+        ✅ **Intelligent spacing normalization**
+        ✅ **Professional HTML formatting**
+        ✅ **Print-ready output**
+        """)
     
     # File upload
     uploaded_file = st.file_uploader(
-        "Upload Legal Judgment PDF",
+        "📄 Upload Legal Judgment PDF",
         type=['pdf'],
-        help="Upload a PDF file containing a legal judgment"
+        help="Select a PDF file containing a legal judgment"
     )
     
     if uploaded_file is not None:
-        st.info(f"📄 **File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB")
+        file_details = f"**File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB"
+        st.info(file_details)
         
         extractor = LegalJudgmentExtractor()
         
-        if st.button("🔍 Extract Text", type="primary"):
-            with st.spinner("Processing PDF..."):
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            extract_button = st.button("🔍 Extract and Format Text", type="primary", use_container_width=True)
+        with col2:
+            if st.button("🔄 Clear Results", use_container_width=True):
+                st.rerun()
+        
+        if extract_button:
+            with st.spinner("Processing PDF and formatting content..."):
                 try:
                     formatted_text, html_output = extractor.process_pdf(uploaded_file, extraction_method)
                     
                     if formatted_text:
-                        st.success("✅ Text extraction completed!")
+                        st.success("✅ Document processed successfully!")
                         
-                        # Tabs for different views
-                        tab1, tab2, tab3, tab4 = st.tabs(["📄 Formatted Text", "🌐 HTML Preview", "📊 Statistics", "💾 Downloads"])
+                        # Create tabs
+                        tab1, tab2, tab3, tab4 = st.tabs([
+                            "📄 Formatted Text", 
+                            "🌐 HTML Preview", 
+                            "📊 Analysis", 
+                            "💾 Downloads"
+                        ])
                         
                         with tab1:
-                            st.subheader("Extracted & Formatted Text")
+                            st.subheader("Formatted Text Output")
                             st.text_area(
-                                "Formatted text with normalized spacing:",
+                                "Clean, formatted text with proper paragraph structure:",
                                 value=formatted_text,
-                                height=600
+                                height=500,
+                                help="This shows the processed text with intelligent formatting"
                             )
                         
                         with tab2:
-                            st.subheader("HTML Preview")
-                            st.components.v1.html(html_output, height=800, scrolling=True)
+                            st.subheader("HTML Document Preview")
+                            st.markdown("*This preview shows how the document will appear when printed or saved as HTML:*")
+                            st.components.v1.html(html_output, height=700, scrolling=True)
                         
                         with tab3:
                             st.subheader("Document Analysis")
                             stats = extractor.generate_statistics(formatted_text)
                             
-                            col1, col2, col3 = st.columns(3)
-                            
+                            # Key metrics
+                            col1, col2, col3, col4 = st.columns(4)
                             with col1:
-                                st.metric("Total Lines", stats['total_lines'])
-                                st.metric("Non-empty Lines", stats['non_empty_lines'])
-                            
+                                st.metric("Pages", stats['pages'])
                             with col2:
                                 st.metric("Total Words", stats['total_words'])
-                                st.metric("Characters", stats['total_characters'])
-                            
                             with col3:
-                                st.metric("Pages", stats['pages'])
-                                st.metric("Avg Words/Page", stats['total_words'] // max(stats['pages'], 1))
+                                st.metric("Paragraphs", stats['content_breakdown']['paragraph'])
+                            with col4:
+                                st.metric("Numbered Items", stats['numbering_items'])
                             
-                            st.markdown("### Numbering Patterns Detected")
-                            for pattern, count in stats['numbering_patterns'].items():
-                                if count > 0:
-                                    st.write(f"• **{pattern.replace('_', ' ').title()}**: {count}")
+                            # Content breakdown
+                            st.markdown("#### Content Structure Analysis")
+                            breakdown_data = {k: v for k, v in stats['content_breakdown'].items() if v > 0}
+                            
+                            for content_type, count in breakdown_data.items():
+                                st.write(f"**{content_type.replace('_', ' ').title()}**: {count} items")
+                            
+                            # Additional metrics
+                            st.markdown("#### Reading Metrics")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Avg Words per Line", f"{stats['avg_words_per_line']:.1f}")
+                            with col2:
+                                st.metric("Character Count", stats['total_characters'])
                         
                         with tab4:
-                            st.subheader("Download Options")
+                            st.subheader("Download Formatted Document")
                             
                             col1, col2 = st.columns(2)
                             
                             with col1:
                                 st.download_button(
-                                    label="📄 Download HTML",
+                                    label="📄 Download HTML File",
                                     data=html_output.encode('utf-8'),
                                     file_name=f"{uploaded_file.name.replace('.pdf', '')}_formatted.html",
-                                    mime="text/html"
+                                    mime="text/html",
+                                    help="Download as formatted HTML document"
                                 )
                             
                             with col2:
                                 st.download_button(
-                                    label="📝 Download Text",
+                                    label="📝 Download Text File",
                                     data=formatted_text.encode('utf-8'),
                                     file_name=f"{uploaded_file.name.replace('.pdf', '')}_formatted.txt",
-                                    mime="text/plain"
+                                    mime="text/plain",
+                                    help="Download as plain text file"
                                 )
+                            
+                            st.markdown("#### Export Options")
+                            st.markdown("""
+                            - **HTML**: Best for viewing, printing, and sharing
+                            - **Text**: Best for editing and further processing
+                            """)
                     
                     else:
-                        st.error("❌ Failed to extract text. Try a different extraction method.")
+                        st.error("❌ Failed to extract text from PDF. Please try a different extraction method.")
                 
                 except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
+                    st.error(f"❌ Processing error: {str(e)}")
+                    st.info("Try using a different extraction method or ensure the PDF contains readable text.")
     
     else:
+        # Show example when no file uploaded
+        st.markdown("### 📋 What This Tool Does")
         
+        col1, col2 = st.columns(2)
         
-        st.markdown("### Sample Output Preview")
+        with col1:
+  
         
+        with col2:
+          
 
 if __name__ == "__main__":
     main()
