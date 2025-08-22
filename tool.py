@@ -24,10 +24,10 @@ class LegalJudgmentExtractor:
     def clean_text(self, text: str) -> str:
         """Clean and normalize text"""
         # Remove problematic characters
-        text = text.replace('Â­', '-')  # Replace soft hyphen
-        text = text.replace('\u00ad', '-')  # Replace soft hyphen
-        text = text.replace('\ufeff', '')  # Remove BOM
-        text = text.replace('\u200b', '')  # Remove zero-width space
+        text = text.replace('Â­', '-')
+        text = text.replace('\u00ad', '-')
+        text = text.replace('\ufeff', '')
+        text = text.replace('\u200b', '')
         
         # Normalize unicode
         text = unicodedata.normalize('NFKC', text)
@@ -35,17 +35,12 @@ class LegalJudgmentExtractor:
         return text
     
     def extract_text_pdfplumber(self, pdf_file) -> str:
-        """Extract text using pdfplumber with better layout preservation"""
+        """Extract text using pdfplumber"""
         try:
             with pdfplumber.open(pdf_file) as pdf:
                 full_text = ""
                 for page_num, page in enumerate(pdf.pages):
-                    # Extract text with layout settings optimized for legal documents
-                    text = page.extract_text(
-                        layout=True, 
-                        x_tolerance=2,
-                        y_tolerance=2
-                    )
+                    text = page.extract_text(layout=True, x_tolerance=2, y_tolerance=2)
                     if text:
                         full_text += text
                         if page_num < len(pdf.pages) - 1:
@@ -92,230 +87,122 @@ class LegalJudgmentExtractor:
             st.error(f"Error with PyPDF2: {str(e)}")
             return ""
     
-    def is_case_number(self, line: str) -> bool:
-        """Check if line is a case number"""
-        return bool(re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+/?\d*$', line.strip()))
-    
-    def is_party_names(self, line: str) -> bool:
-        """Check if line contains party names (VS pattern)"""
-        upper_line = line.strip().upper()
-        return ' VS ' in upper_line or ' V/S ' in upper_line or ' V. ' in upper_line
-    
-    def is_date(self, line: str) -> bool:
-        """Check if line is a date"""
-        return bool(re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', line.strip()))
-    
-    def is_present_line(self, line: str) -> bool:
-        """Check if line starts with Present"""
-        return line.strip().lower().startswith('present')
-    
-    def is_page_marker(self, line: str) -> bool:
-        """Check if line is a page marker like :2:"""
-        return bool(re.match(r'^:\d+:$', line.strip()))
-    
-    def is_numbered_item(self, line: str) -> bool:
-        """Check if line is a numbered list item"""
-        stripped = line.strip()
-        patterns = [
-            r'^\([ivxlcdm]+\)',  # Roman numerals in parentheses
-            r'^\([a-z]\)',       # Letters in parentheses
-            r'^\d+\)',           # Numbers in parentheses
-        ]
-        return any(re.match(pattern, stripped, re.IGNORECASE) for pattern in patterns)
-    
-    def is_signature_block(self, line: str) -> bool:
-        """Check if line is part of signature block"""
-        stripped = line.strip()
-        signature_patterns = [
-            r'^[A-Z\s]+$',  # All caps names
-            r'^District Judge$',
-            r'^Additional District Judge$',
-            r'^\([A-Za-z\s\-]+Court[^)]*\)$',
-            r'^[A-Za-z\s,]+/\d{1,2}\.\d{1,2}\.\d{4}$'  # Location/date
-        ]
-        
-        # Must be reasonably short and match patterns
-        if len(stripped) > 50:
-            return False
-            
-        return any(re.match(pattern, stripped, re.IGNORECASE) for pattern in signature_patterns)
-    
-    def reconstruct_document(self, text: str) -> List[Dict]:
-        """Reconstruct document preserving original structure"""
+    def minimal_paragraph_reconstruction(self, text: str) -> str:
+        """Minimal reconstruction - only fix obvious line breaks within sentences"""
         lines = text.split('\n')
-        document_blocks = []
-        current_paragraph = []
-        
+        reconstructed = []
         i = 0
+        
         while i < len(lines):
             line = lines[i].strip()
             
-            # Skip empty lines
-            if not line:
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
+            # Keep empty lines and page breaks as-is
+            if not line or '[PAGE_BREAK]' in line:
+                reconstructed.append(line)
                 i += 1
                 continue
             
-            # Handle page breaks
-            if '[PAGE_BREAK]' in line:
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'page_break', 'content': ''})
-                i += 1
-                continue
+            # Check if this line should be joined with next lines
+            current_block = [line]
+            j = i + 1
             
-            # Identify line type and handle accordingly
-            if self.is_case_number(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'case_number', 'content': line})
+            # Only join lines that are clearly fragmented parts of sentences
+            while j < len(lines):
+                next_line = lines[j].strip()
                 
-            elif self.is_party_names(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'party_names', 'content': line})
+                # Stop at empty lines or special markers
+                if not next_line or '[PAGE_BREAK]' in next_line:
+                    break
                 
-            elif self.is_date(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'date', 'content': line})
+                # Stop at lines that clearly start new sections
+                if (re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', next_line) or  # Case number
+                    ' VS ' in next_line.upper() or ' V/S ' in next_line.upper() or  # Party names
+                    re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', next_line) or  # Date
+                    re.match(r'^Present\s*:', next_line, re.IGNORECASE) or  # Present
+                    re.match(r'^:\d+:$', next_line) or  # Page marker
+                    re.match(r'^\([ivxlcdmIVXLCDM]+\)', next_line) or  # Roman numerals
+                    re.match(r'^\([a-zA-Z]\)', next_line) or  # Letter items
+                    next_line.isupper() and len(next_line.split()) <= 4):  # Short ALL CAPS (likely signatures)
+                    break
                 
-            elif self.is_present_line(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'present', 'content': line})
-                
-            elif self.is_page_marker(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'page_marker', 'content': line})
-                
-            elif self.is_numbered_item(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                
-                # Collect the complete numbered item including continuation lines
-                numbered_content = [line]
-                j = i + 1
-                
-                # Look for continuation lines that are indented or clearly part of this item
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    if not next_line:
-                        break
-                    
-                    # Stop if we hit another numbered item, special line, or clear new paragraph
-                    if (self.is_numbered_item(next_line) or 
-                        self.is_case_number(next_line) or 
-                        self.is_party_names(next_line) or 
-                        self.is_date(next_line) or 
-                        self.is_present_line(next_line) or 
-                        self.is_page_marker(next_line) or
-                        self.is_signature_block(next_line)):
-                        break
-                    
-                    # If the line seems to be a continuation (doesn't start with capital or is clearly continuing)
-                    if (not next_line[0].isupper() or 
-                        next_line.lower().startswith(('and', 'or', 'but', 'the', 'of', 'in', 'on', 'at', 'to', 'for', 'with'))):
-                        numbered_content.append(next_line)
-                        j += 1
-                    else:
-                        break
-                
-                document_blocks.append({
-                    'type': 'numbered_item',
-                    'content': ' '.join(numbered_content).strip()
-                })
-                i = j
-                continue
-                
-            elif self.is_signature_block(line):
-                if current_paragraph:
-                    document_blocks.append({
-                        'type': 'paragraph',
-                        'content': ' '.join(current_paragraph).strip()
-                    })
-                    current_paragraph = []
-                document_blocks.append({'type': 'signature', 'content': line})
-                
-            else:
-                # Regular paragraph text
-                current_paragraph.append(line)
-            
-            i += 1
-        
-        # Handle any remaining paragraph
-        if current_paragraph:
-            document_blocks.append({
-                'type': 'paragraph',
-                'content': ' '.join(current_paragraph).strip()
-            })
-        
-        return document_blocks
-    
-    def blocks_to_text(self, blocks: List[Dict]) -> str:
-        """Convert document blocks back to formatted text"""
-        text_lines = []
-        
-        for block in blocks:
-            if block['type'] == 'page_break':
-                text_lines.append('\n[PAGE_BREAK]\n')
-            elif block['type'] == 'numbered_item':
-                # Add proper indentation for numbered items
-                content = block['content']
-                # Extract the number/letter part and content
-                match = re.match(r'^(\([ivxlcdm]+\)|\([a-z]\)|\d+\))\s*(.*)', content, re.IGNORECASE)
-                if match:
-                    number_part = match.group(1)
-                    content_part = match.group(2)
-                    text_lines.append(f"    {number_part} {content_part}")
+                # Join if the current line doesn't end with sentence-ending punctuation
+                # and the next line doesn't start with a capital letter (indicating continuation)
+                if (not line.rstrip().endswith(('.', ':', ')', '}')) and 
+                    (not next_line[0].isupper() or 
+                     next_line.lower().startswith(('and', 'or', 'but', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'the', 'a', 'an')))):
+                    current_block.append(next_line)
+                    line = next_line  # Update line for next iteration check
+                    j += 1
                 else:
-                    text_lines.append(f"    {content}")
-            else:
-                if block['content']:
-                    text_lines.append(block['content'])
+                    break
             
-            # Add spacing after certain block types
-            if block['type'] in ['case_number', 'party_names', 'date', 'present', 'paragraph', 'numbered_item', 'signature']:
-                text_lines.append('')
+            # Join the block and add to reconstructed
+            reconstructed.append(' '.join(current_block))
+            i = j
         
-        return '\n'.join(text_lines)
+        return '\n'.join(reconstructed)
     
-    def convert_to_html(self, blocks: List[Dict]) -> str:
-        """Convert document blocks to HTML with accurate formatting"""
+    def identify_content_type(self, line: str) -> str:
+        """Identify content type with high precision"""
+        stripped = line.strip()
+        
+        if not stripped:
+            return "empty"
+        
+        if '[PAGE_BREAK]' in stripped:
+            return "page_break"
+        
+        # Case number - very specific pattern
+        if re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+/?\d*$', stripped):
+            return "case_number"
+        
+        # Party names - contains VS pattern
+        if (' VS ' in stripped.upper() or ' V/S ' in stripped.upper() or 
+            (' V. ' in stripped.upper() and len(stripped.split()) <= 10)):
+            return "party_names"
+        
+        # Date
+        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
+            return "date"
+        
+        # Present line
+        if re.match(r'^Present\s*:', stripped, re.IGNORECASE):
+            return "present"
+        
+        # Page marker
+        if re.match(r'^:\d+:$', stripped):
+            return "page_marker"
+        
+        # Numbered items with specific patterns
+        if re.match(r'^\([ivxlcdmIVXLCDM]+\)\s+', stripped):
+            return "numbered_item"
+        if re.match(r'^\([a-zA-Z]\)\s+', stripped):
+            return "numbered_item"
+        
+        # Signature detection - very conservative
+        # Only short ALL CAPS names or specific court titles
+        if (stripped.isupper() and 
+            3 <= len(stripped) <= 30 and 
+            stripped.replace(' ', '').isalpha() and
+            not any(word in stripped.lower() for word in ['the', 'and', 'or', 'of', 'in', 'on', 'at', 'for', 'with'])):
+            return "signature"
+        
+        # Court designations
+        if re.match(r'^District Judge$', stripped, re.IGNORECASE):
+            return "signature"
+        
+        if re.match(r'^\([A-Za-z\s\-]+Court[^)]*\)$', stripped):
+            return "signature"
+        
+        # Location with date pattern
+        if re.match(r'^[A-Za-z\s,\.]+/\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
+            return "signature"
+        
+        return "paragraph"
+    
+    def convert_to_html(self, text: str) -> str:
+        """Convert to HTML with minimal formatting"""
+        lines = text.split('\n')
         
         html_content = ['''<!DOCTYPE html>
 <html lang="en">
@@ -325,109 +212,95 @@ class LegalJudgmentExtractor:
     <title>Legal Judgment</title>
     <style>
         body {
-            font-family: 'Times New Roman', Times, serif;
-            line-height: 1.5;
+            font-family: 'Times New Roman', serif;
+            line-height: 1.4;
             margin: 0;
             padding: 20px;
-            background-color: #f5f5f5;
-            color: #000;
-            font-size: 14px;
+            background-color: #ffffff;
+            color: #000000;
+            font-size: 12pt;
         }
         
         .judgment-container {
-            max-width: 210mm;
+            max-width: 8.5in;
             margin: 0 auto;
-            padding: 25mm;
+            padding: 1in;
             background: white;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-            border: 1px solid #ccc;
-            min-height: 297mm;
+            min-height: 11in;
         }
         
         .case-number {
             text-align: center;
             font-weight: bold;
-            margin: 20px 0;
-            font-size: 14px;
+            margin: 1em 0;
         }
         
         .party-names {
             text-align: center;
             font-weight: bold;
-            margin: 20px 0;
-            border-bottom: 1px solid #000;
-            padding-bottom: 10px;
-            font-size: 14px;
+            margin: 1em 0;
+            text-decoration: underline;
         }
         
         .date {
             text-align: center;
-            margin: 20px 0;
-            font-size: 14px;
+            margin: 1em 0;
         }
         
         .present {
-            margin: 20px 0;
-            font-size: 14px;
+            margin: 1em 0;
         }
         
         .paragraph {
-            margin: 15px 0;
+            margin: 0.8em 0;
             text-align: justify;
-            line-height: 1.6;
-            font-size: 14px;
+            line-height: 1.5;
         }
         
         .numbered-item {
-            margin: 15px 0;
+            margin: 0.8em 0;
             text-align: justify;
-            line-height: 1.6;
-            padding-left: 20px;
-            text-indent: -20px;
-            font-size: 14px;
+            line-height: 1.5;
+            padding-left: 2em;
+            text-indent: -2em;
         }
         
         .signature {
             text-align: center;
             font-weight: bold;
-            margin: 25px 0 10px 0;
-            font-size: 14px;
+            margin: 1.5em 0 0.5em 0;
         }
         
         .page-marker {
             text-align: center;
-            margin: 20px 0;
-            font-size: 14px;
+            margin: 1em 0;
         }
         
         .page-break {
             page-break-before: always;
-            margin: 30px 0;
+            margin: 2em 0 1em 0;
             text-align: center;
             color: #666;
             font-style: italic;
-            border-top: 1px solid #ccc;
-            padding-top: 20px;
         }
         
-        /* Print styles */
+        .empty-line {
+            height: 1em;
+        }
+        
         @media print {
             body { 
                 margin: 0; 
                 background: white;
-                font-size: 12px;
+                font-size: 11pt;
             }
             .judgment-container { 
-                box-shadow: none; 
-                border: none; 
                 margin: 0; 
-                padding: 20mm;
+                padding: 0.75in;
                 min-height: auto;
             }
             .page-break {
-                border-top: none;
                 margin: 0;
-                padding: 0;
                 font-size: 0;
                 height: 0;
             }
@@ -437,30 +310,36 @@ class LegalJudgmentExtractor:
 <body>
     <div class="judgment-container">''']
         
-        for block in blocks:
-            if not block['content'] and block['type'] != 'page_break':
-                continue
-                
-            content = block['content'].replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+        for line in lines:
+            stripped = line.strip()
             
-            if block['type'] == 'case_number':
-                html_content.append(f'<div class="case-number">{content}</div>')
-            elif block['type'] == 'party_names':
-                html_content.append(f'<div class="party-names">{content}</div>')
-            elif block['type'] == 'date':
-                html_content.append(f'<div class="date">{content}</div>')
-            elif block['type'] == 'present':
-                html_content.append(f'<div class="present">{content}</div>')
-            elif block['type'] == 'paragraph':
-                html_content.append(f'<div class="paragraph">{content}</div>')
-            elif block['type'] == 'numbered_item':
-                html_content.append(f'<div class="numbered-item">{content}</div>')
-            elif block['type'] == 'signature':
-                html_content.append(f'<div class="signature">{content}</div>')
-            elif block['type'] == 'page_marker':
-                html_content.append(f'<div class="page-marker">{content}</div>')
-            elif block['type'] == 'page_break':
+            if not stripped:
+                html_content.append('<div class="empty-line"></div>')
+                continue
+            
+            content_type = self.identify_content_type(stripped)
+            
+            # Escape HTML
+            escaped_content = stripped.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+            
+            if content_type == "page_break":
                 html_content.append('<div class="page-break">--- Page Break ---</div>')
+            elif content_type == "case_number":
+                html_content.append(f'<div class="case-number">{escaped_content}</div>')
+            elif content_type == "party_names":
+                html_content.append(f'<div class="party-names">{escaped_content}</div>')
+            elif content_type == "date":
+                html_content.append(f'<div class="date">{escaped_content}</div>')
+            elif content_type == "present":
+                html_content.append(f'<div class="present">{escaped_content}</div>')
+            elif content_type == "page_marker":
+                html_content.append(f'<div class="page-marker">{escaped_content}</div>')
+            elif content_type == "numbered_item":
+                html_content.append(f'<div class="numbered-item">{escaped_content}</div>')
+            elif content_type == "signature":
+                html_content.append(f'<div class="signature">{escaped_content}</div>')
+            else:  # paragraph
+                html_content.append(f'<div class="paragraph">{escaped_content}</div>')
         
         html_content.append('''    </div>
 </body>
@@ -468,30 +347,39 @@ class LegalJudgmentExtractor:
         
         return '\n'.join(html_content)
     
-    def generate_statistics(self, blocks: List[Dict]) -> Dict:
-        """Generate document statistics from blocks"""
-        stats = {
-            'total_blocks': len(blocks),
-            'pages': len([b for b in blocks if b['type'] == 'page_break']) + 1,
-            'paragraphs': len([b for b in blocks if b['type'] == 'paragraph']),
-            'numbered_items': len([b for b in blocks if b['type'] == 'numbered_item']),
-            'signatures': len([b for b in blocks if b['type'] == 'signature']),
-        }
+    def format_text(self, text: str) -> str:
+        """Format text with proper indentation for numbered items"""
+        lines = text.split('\n')
+        formatted_lines = []
         
-        # Count total words
-        total_words = 0
-        for block in blocks:
-            if block['content']:
-                total_words += len(block['content'].split())
+        for line in lines:
+            if not line.strip():
+                formatted_lines.append('')
+                continue
+                
+            content_type = self.identify_content_type(line)
+            
+            if content_type == "numbered_item":
+                # Add proper indentation for numbered items
+                stripped = line.strip()
+                # Extract the numbering part and indent properly
+                match = re.match(r'^(\([ivxlcdmIVXLCDM]+\)|\([a-zA-Z]\))\s*(.*)', stripped, re.IGNORECASE)
+                if match:
+                    number_part = match.group(1)
+                    content_part = match.group(2)
+                    formatted_lines.append(f"        {number_part} {content_part}")
+                else:
+                    formatted_lines.append(f"        {stripped}")
+            else:
+                formatted_lines.append(line.strip())
         
-        stats['total_words'] = total_words
-        return stats
+        return '\n'.join(formatted_lines)
     
     def process_pdf(self, pdf_file, extraction_method: str) -> Tuple[str, str]:
-        """Process PDF and return formatted text and HTML"""
+        """Process PDF with minimal intervention approach"""
         pdf_file.seek(0)
         
-        # Extract text based on method
+        # Extract text
         if extraction_method == "PDFPlumber (Recommended)":
             extracted_text = self.extract_text_pdfplumber(pdf_file)
         elif extraction_method == "PyMuPDF":
@@ -502,19 +390,21 @@ class LegalJudgmentExtractor:
         if not extracted_text:
             return "", ""
         
-        # Reconstruct document structure
-        document_blocks = self.reconstruct_document(extracted_text)
+        # Minimal paragraph reconstruction - only join obvious fragments
+        reconstructed_text = self.minimal_paragraph_reconstruction(extracted_text)
         
-        # Convert to formatted text and HTML
-        formatted_text = self.blocks_to_text(document_blocks)
-        html_output = self.convert_to_html(document_blocks)
+        # Format text
+        formatted_text = self.format_text(reconstructed_text)
+        
+        # Convert to HTML
+        html_output = self.convert_to_html(reconstructed_text)
         
         return formatted_text, html_output
 
 def main():
-    st.title("Legal Judgment Text Extractor - Structure Preserving Version")
+    st.title("Legal Judgment Text Extractor - Minimal Intervention")
     st.markdown("---")
-    st.markdown("**Extracts and formats legal judgments while preserving original document structure**")
+    st.markdown("**Preserves original PDF structure with minimal processing**")
     
     # Sidebar
     with st.sidebar:
@@ -526,13 +416,13 @@ def main():
             help="Choose the PDF text extraction method"
         )
         
-        st.markdown("### Key Features")
+        st.markdown("### Approach")
         st.markdown("""
+        - **Minimal Processing**: Only essential fixes
         - **Structure Preservation**: Maintains original layout
-        - **No Over-Fragmentation**: Keeps sentences intact
-        - **Accurate Indentation**: Proper numbered item formatting
-        - **Minimal Spacing**: Matches original document spacing
-        - **Correct Bold/Center**: Only where actually present
+        - **Conservative Classification**: Only obvious patterns
+        - **No Over-joining**: Keeps natural breaks
+        - **Accurate Formatting**: Matches original appearance
         """)
     
     # File upload
@@ -550,63 +440,41 @@ def main():
         
         col1, col2 = st.columns([2, 1])
         with col1:
-            extract_button = st.button("Extract and Format Text", type="primary", use_container_width=True)
+            extract_button = st.button("Extract with Minimal Processing", type="primary", use_container_width=True)
         with col2:
             if st.button("Clear Results", use_container_width=True):
                 st.rerun()
         
         if extract_button:
-            with st.spinner("Processing PDF while preserving structure..."):
+            with st.spinner("Processing with minimal intervention..."):
                 try:
                     formatted_text, html_output = extractor.process_pdf(uploaded_file, extraction_method)
                     
                     if formatted_text:
-                        st.success("Document processed successfully - structure preserved!")
+                        st.success("Document processed - original structure preserved!")
                         
                         # Create tabs
-                        tab1, tab2, tab3, tab4 = st.tabs([
+                        tab1, tab2, tab3 = st.tabs([
                             "Formatted Text", 
                             "HTML Preview", 
-                            "Analysis", 
                             "Downloads"
                         ])
                         
                         with tab1:
-                            st.subheader("Structure-Preserving Formatted Text")
+                            st.subheader("Minimally Processed Text")
                             st.text_area(
-                                "Formatted text maintaining original document structure:",
+                                "Text with minimal processing:",
                                 value=formatted_text,
                                 height=500,
-                                help="Text formatted to match original PDF layout"
+                                help="Original structure preserved with only essential formatting"
                             )
                         
                         with tab2:
-                            st.subheader("HTML Preview - Original Structure")
-                            st.markdown("*Formatted to match the original PDF appearance:*")
+                            st.subheader("HTML Preview")
+                            st.markdown("*Formatted to closely match original PDF:*")
                             st.components.v1.html(html_output, height=700, scrolling=True)
                         
                         with tab3:
-                            st.subheader("Document Analysis")
-                            
-                            # Parse blocks for statistics
-                            blocks = extractor.reconstruct_document(
-                                extractor.extract_text_pdfplumber(uploaded_file) if extraction_method == "PDFPlumber (Recommended)"
-                                else extractor.extract_text_pymupdf(uploaded_file) if extraction_method == "PyMuPDF"
-                                else extractor.extract_text_pypdf2(uploaded_file)
-                            )
-                            stats = extractor.generate_statistics(blocks)
-                            
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Pages", stats['pages'])
-                            with col2:
-                                st.metric("Paragraphs", stats['paragraphs'])
-                            with col3:
-                                st.metric("Numbered Items", stats['numbered_items'])
-                            with col4:
-                                st.metric("Total Words", stats['total_words'])
-                        
-                        with tab4:
                             st.subheader("Download Options")
                             
                             col1, col2 = st.columns(2)
@@ -615,18 +483,18 @@ def main():
                                 st.download_button(
                                     label="Download HTML File",
                                     data=html_output.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_structured.html",
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_minimal.html",
                                     mime="text/html",
-                                    help="Download as structured HTML document"
+                                    help="Download HTML with minimal processing"
                                 )
                             
                             with col2:
                                 st.download_button(
                                     label="Download Text File",
                                     data=formatted_text.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_structured.txt",
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_minimal.txt",
                                     mime="text/plain",
-                                    help="Download as structured text file"
+                                    help="Download text with minimal processing"
                                 )
                     
                     else:
@@ -634,7 +502,7 @@ def main():
                 
                 except Exception as e:
                     st.error(f"Processing error: {str(e)}")
-                    st.info("Try using a different extraction method or ensure the PDF contains readable text.")
+                    st.info("Try using a different extraction method.")
 
 if __name__ == "__main__":
     main()
