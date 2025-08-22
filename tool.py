@@ -1,239 +1,489 @@
-# app.py
 import streamlit as st
+import PyPDF2
 import fitz  # PyMuPDF
-import html
-from datetime import datetime
-from typing import List, Tuple
+import pdfplumber
 import re
+from io import BytesIO
+import base64
+from typing import List, Tuple
+import unicodedata
 
-st.set_page_config(page_title="Judgment → HTML ", layout="wide", page_icon="")
-st.title("Judgment Parser")
-
-st.markdown(
-    "This version attempts to reconstruct paragraphs (join broken lines), preserve numbering/sub-numbering, "
-    "and render justified HTML to reduce the blank right-side space. If your PDF is image-only, OCR first."
+# Page configuration
+st.set_page_config(
+    page_title="Legal Judgment Text Extractor",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Sidebar controls
-st.sidebar.header("Extraction & formatting options")
-keep_lines = st.sidebar.checkbox("Keep original lines (no paragraph join)", value=False,
-                                 help="Show exact extracted lines (useful for debugging). When off, the tool will try to reconstruct paragraphs.")
-aggressive_join = st.sidebar.checkbox("Aggressive paragraph join", value=True,
-                                      help="More aggressively join lines that look like continuations. Good for legal text with many short line breaks.")
-preserve_nbsp = st.sidebar.checkbox("Preserve NBSP (\\u00A0)", value=False)
-remove_soft_hyphen = st.sidebar.checkbox("Remove soft-hyphen (\\u00AD)", value=True)
-font_size = st.sidebar.slider("Font size (px)", 12, 18, 14)
-mono = st.sidebar.checkbox("Use monospace font", value=False)
-upload = st.file_uploader("Upload judgment PDF", type=["pdf"])
-
-if not upload:
-    st.info("Please upload a PDF to extract.")
-    st.stop()
-
-pdf_bytes = upload.read()
-if not pdf_bytes:
-    st.error("Uploaded file appears empty.")
-    st.stop()
-
-# --- helpers ----------------------------------------------------------------
-num_pattern = re.compile(r"""^\s*(?:            # optional leading space
-    (?P<num>(\d+[\.\)]|[IVXLCDMivxlcdm]+[\.\)]|[a-zA-Z]\.|[ivx]+\)|\([ivx]+\)|\([a-z]\)|\(\w+\)))  # numbering examples
-    \s+)?""", re.VERBOSE)
-
-def extract_lines_from_page(page: fitz.Page) -> List[str]:
-    """Extract lines ordered left-to-right using page.get_text('dict')."""
-    d = page.get_text("dict")
-    lines = []
-    for block in d.get("blocks", []):
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", []):
-            spans = sorted(line.get("spans", []), key=lambda s: s.get("bbox", [0])[0])
-            txt = "".join(s.get("text", "") for s in spans)
-            # Normalize common control chars
-            txt = txt.replace("\x0b", " ").replace("\r", "")
-            lines.append(txt)
-    return lines
-
-def normalize_line(s: str) -> str:
-    if remove_soft_hyphen:
-        s = s.replace("\u00ad", "")  # remove soft hyphen
-    if not preserve_nbsp:
-        s = s.replace("\u00a0", " ")
-    return s
-
-def line_is_numbering_start(s: str) -> bool:
-    """Heuristic: True if line begins with a numbering / sub-numbering token."""
-    return bool(re.match(r'^\s*(?:\d+[\.\)]|[ivxlcdmIVXLCDM]+\)|\([ivxlcdmIVXLCDM]+\)|\([a-z]\)|[A-Z]\.)', s))
-
-def likely_continuation(prev: str, nxt: str) -> bool:
-    """
-    Heuristics to decide whether nxt should be joined to prev.
-    Returns True => join nxt into current paragraph (with appropriate spacing).
-    """
-    if not prev.strip() or not nxt.strip():
-        return False
-    # If next line starts with numbering, it's likely a new item
-    if line_is_numbering_start(nxt):
-        return False
-    # If previous line ends with hyphen (soft or normal) -> join without space
-    if prev.rstrip().endswith(('-', '\u00ad')):
-        return True
-    # If previous line ends with an em dash, colon -> continuation
-    if re.search(r'[:—-]\s*$', prev.strip()):
-        return True
-    # If aggressive join is enabled: if nxt starts with lowercase or punctuation, join
-    if aggressive_join:
-        if re.match(r'^\s*[a-z0-9\(\[]', nxt):  # starts lowercase/number/paren/bracket
-            return True
-        # join if previous line doesn't end with a sentence terminator and next starts lowercase/quote
-        if not re.search(r'[\.!?]\s*$', prev.strip()) and re.match(r'^\s*[a-z\"\'\u201c]', nxt):
-            return True
-    else:
-        # conservative: join if next begins lowercase or prev clearly mid-sentence (no period)
-        if re.match(r'^\s*[a-z]', nxt) and not re.search(r'[\.!?]\s*$', prev.strip()):
-            return True
-    return False
-
-def reconstruct_paragraphs(lines: List[str]) -> List[str]:
-    """Return a list of paragraphs reconstructed from lines, preserving numbering starts."""
-    if not lines:
-        return []
-    paras = []
-    cur = normalize_line(lines[0])
-    for raw in lines[1:]:
-        nxt = normalize_line(raw)
-        # if line is blank -> paragraph break
-        if not nxt.strip():
-            paras.append(cur.rstrip())
-            cur = ""
-            continue
-        # If this line looks like a numbering header, break paragraph
-        if line_is_numbering_start(nxt) and cur.strip():
-            paras.append(cur.rstrip())
-            cur = nxt
-            continue
-        # Decide whether to join
-        if likely_continuation(cur, nxt):
-            # If prev ended with hyphen remove hyphen and join directly
-            if cur.rstrip().endswith('-') or cur.rstrip().endswith('\u00ad'):
-                cur = cur.rstrip()[:-1] + nxt.lstrip()
+class LegalJudgmentExtractor:
+    def __init__(self):
+        self.extracted_text = ""
+        self.html_output = ""
+    
+    def extract_text_pdfplumber(self, pdf_file) -> str:
+        """Extract text using pdfplumber - best for preserving layout"""
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                full_text = ""
+                for page_num, page in enumerate(pdf.pages):
+                    # Get text with layout preservation
+                    text = page.extract_text(layout=True, x_tolerance=1, y_tolerance=1)
+                    if text:
+                        full_text += text
+                        if page_num < len(pdf.pages) - 1:  # Add page break except for last page
+                            full_text += "\n\n--- PAGE BREAK ---\n\n"
+                return full_text
+        except Exception as e:
+            st.error(f"Error with pdfplumber: {str(e)}")
+            return ""
+    
+    def extract_text_pymupdf(self, pdf_file) -> str:
+        """Extract text using PyMuPDF - good for formatting"""
+        try:
+            pdf_document = fitz.open(stream=pdf_file.read(), filetype="pdf")
+            full_text = ""
+            
+            for page_num in range(pdf_document.page_count):
+                page = pdf_document.get_page(page_num)
+                # Get text blocks with position information
+                blocks = page.get_text("dict")
+                
+                page_text = ""
+                current_y = None
+                
+                for block in blocks["blocks"]:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            line_text = ""
+                            line_y = line["bbox"][1]  # y coordinate
+                            
+                            # Add extra line breaks for significant y-coordinate jumps
+                            if current_y is not None and abs(line_y - current_y) > 20:
+                                page_text += "\n"
+                            
+                            for span in line["spans"]:
+                                line_text += span["text"]
+                            
+                            if line_text.strip():
+                                page_text += line_text + "\n"
+                                current_y = line_y
+                
+                full_text += page_text
+                if page_num < pdf_document.page_count - 1:
+                    full_text += "\n\n--- PAGE BREAK ---\n\n"
+            
+            pdf_document.close()
+            return full_text
+        except Exception as e:
+            st.error(f"Error with PyMuPDF: {str(e)}")
+            return ""
+    
+    def extract_text_pypdf2(self, pdf_file) -> str:
+        """Extract text using PyPDF2 - fallback method"""
+        try:
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            full_text = ""
+            
+            for page_num, page in enumerate(pdf_reader.pages):
+                text = page.extract_text()
+                full_text += text
+                if page_num < len(pdf_reader.pages) - 1:
+                    full_text += "\n\n--- PAGE BREAK ---\n\n"
+            
+            return full_text
+        except Exception as e:
+            st.error(f"Error with PyPDF2: {str(e)}")
+            return ""
+    
+    def preserve_formatting(self, text: str) -> str:
+        """Preserve original formatting and spacing"""
+        # Split into lines
+        lines = text.split('\n')
+        formatted_lines = []
+        
+        for line in lines:
+            # Preserve leading spaces
+            leading_spaces = len(line) - len(line.lstrip())
+            
+            # Clean up the line but preserve internal spacing
+            cleaned_line = re.sub(r'\s+', ' ', line.strip()) if line.strip() else ""
+            
+            # Add back leading spaces
+            if cleaned_line:
+                formatted_line = ' ' * leading_spaces + cleaned_line
+                formatted_lines.append(formatted_line)
             else:
-                cur = cur.rstrip() + " " + nxt.lstrip()
-        else:
-            # Break paragraph: append current and start new
-            paras.append(cur.rstrip())
-            cur = nxt
-    if cur.strip():
-        paras.append(cur.rstrip())
-    return paras
+                formatted_lines.append("")  # Preserve empty lines
+        
+        return '\n'.join(formatted_lines)
+    
+    def detect_numbering_patterns(self, text: str) -> List[Tuple[str, str]]:
+        """Detect various numbering patterns in legal documents"""
+        patterns = [
+            (r'^\s*(\d+\.)\s+', 'main-numbering'),  # 1. 2. 3.
+            (r'^\s*\(([ivxlcdm]+)\)\s+', 'roman-numbering'),  # (i) (ii) (iii)
+            (r'^\s*\(([a-z])\)\s+', 'alpha-numbering'),  # (a) (b) (c)
+            (r'^\s*([A-Z]\.)\s+', 'capital-alpha'),  # A. B. C.
+            (r'^\s*(\d+\.\d+\.?\d*\.?)\s+', 'decimal-numbering'),  # 1.1 1.1.1
+            (r'^\s*Article\s+(\d+)', 'article-numbering'),  # Article 1
+            (r'^\s*Section\s+(\d+)', 'section-numbering'),  # Section 1
+            (r'^\s*Para\s+(\d+)', 'para-numbering'),  # Para 1
+        ]
+        
+        found_patterns = []
+        lines = text.split('\n')
+        
+        for line in lines[:50]:  # Check first 50 lines
+            for pattern, pattern_type in patterns:
+                if re.match(pattern, line, re.IGNORECASE):
+                    found_patterns.append((pattern, pattern_type))
+                    break
+        
+        return found_patterns
+    
+    def convert_to_html(self, text: str) -> str:
+        """Convert extracted text to HTML with preserved formatting"""
+        lines = text.split('\n')
+        html_content = []
+        
+        # Detect numbering patterns
+        numbering_patterns = self.detect_numbering_patterns(text)
+        
+        html_content.append('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Legal Judgment</title>
+            <style>
+                body {
+                    font-family: 'Times New Roman', serif;
+                    line-height: 1.6;
+                    margin: 20px;
+                    background-color: #ffffff;
+                    color: #000000;
+                }
+                .judgment-container {
+                    max-width: 800px;
+                    margin: 0 auto;
+                    padding: 20px;
+                    border: 1px solid #ccc;
+                    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                }
+                .header {
+                    text-align: center;
+                    font-weight: bold;
+                    margin-bottom: 20px;
+                    border-bottom: 2px solid #000;
+                    padding-bottom: 10px;
+                }
+                .case-number {
+                    font-weight: bold;
+                    text-align: center;
+                }
+                .date {
+                    text-align: right;
+                    font-weight: bold;
+                }
+                .main-numbering {
+                    font-weight: bold;
+                    margin-top: 15px;
+                }
+                .sub-numbering {
+                    margin-left: 20px;
+                    margin-top: 10px;
+                }
+                .roman-numbering {
+                    margin-left: 30px;
+                    margin-top: 8px;
+                }
+                .alpha-numbering {
+                    margin-left: 40px;
+                    margin-top: 5px;
+                }
+                .paragraph {
+                    margin-bottom: 10px;
+                    text-align: justify;
+                }
+                .page-break {
+                    page-break-before: always;
+                    border-top: 2px dashed #ccc;
+                    padding-top: 20px;
+                    margin-top: 20px;
+                }
+                .signature-block {
+                    text-align: right;
+                    margin-top: 30px;
+                    font-weight: bold;
+                }
+                pre {
+                    font-family: 'Times New Roman', serif;
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="judgment-container">
+        ''')
+        
+        in_header = True
+        signature_started = False
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            # Skip empty lines but preserve them in output
+            if not line_stripped:
+                html_content.append('<br>')
+                continue
+            
+            # Handle page breaks
+            if "PAGE BREAK" in line:
+                html_content.append('<div class="page-break"></div>')
+                continue
+            
+            # Preserve exact spacing by converting to HTML entities
+            html_line = line.replace(' ', '&nbsp;').replace('<', '&lt;').replace('>', '&gt;')
+            
+            # Detect different types of content and apply appropriate styling
+            css_class = "paragraph"
+            
+            # Case number detection
+            if re.match(r'^[A-Z\s]*\([A-Z]\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', line_stripped):
+                css_class = "case-number"
+            
+            # Date detection
+            elif re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}', line_stripped):
+                css_class = "date"
+            
+            # Main numbering detection
+            elif re.match(r'^\s*\d+\.\s+', line):
+                css_class = "main-numbering"
+            
+            # Roman numbering detection
+            elif re.match(r'^\s*\([ivxlcdm]+\)\s+', line, re.IGNORECASE):
+                css_class = "roman-numbering"
+            
+            # Alphabetic numbering detection
+            elif re.match(r'^\s*\([a-z]\)\s+', line):
+                css_class = "alpha-numbering"
+            
+            # Sub-numbering detection
+            elif re.match(r'^\s*\d+\.\d+', line):
+                css_class = "sub-numbering"
+            
+            # Signature block detection
+            elif re.search(r'(Judge|District Judge|Magistrate)', line_stripped, re.IGNORECASE):
+                css_class = "signature-block"
+                signature_started = True
+            elif signature_started and (re.match(r'^[A-Z\s]+$', line_stripped) or 
+                                     re.search(r'(Court|District|New Delhi)', line_stripped)):
+                css_class = "signature-block"
+            
+            # Header detection (first few lines)
+            if in_header and i < 10:
+                if re.match(r'^[A-Z\s]*VS?[A-Z\s]*$', line_stripped, re.IGNORECASE):
+                    css_class = "header"
+                elif "present" in line_stripped.lower() or "heard" in line_stripped.lower():
+                    in_header = False
+            
+            # Add the line with appropriate styling
+            html_content.append(f'<div class="{css_class}"><pre>{html_line}</pre></div>')
+        
+        html_content.append('''
+            </div>
+        </body>
+        </html>
+        ''')
+        
+        return '\n'.join(html_content)
+    
+    def process_pdf(self, pdf_file, extraction_method: str) -> Tuple[str, str]:
+        """Process PDF and return extracted text and HTML"""
+        # Reset file pointer
+        pdf_file.seek(0)
+        
+        # Extract text based on selected method
+        if extraction_method == "PDFPlumber (Recommended)":
+            extracted_text = self.extract_text_pdfplumber(pdf_file)
+        elif extraction_method == "PyMuPDF":
+            extracted_text = self.extract_text_pymupdf(pdf_file)
+        else:  # PyPDF2
+            extracted_text = self.extract_text_pypdf2(pdf_file)
+        
+        if not extracted_text:
+            return "", ""
+        
+        # Preserve formatting
+        formatted_text = self.preserve_formatting(extracted_text)
+        
+        # Convert to HTML
+        html_output = self.convert_to_html(formatted_text)
+        
+        return formatted_text, html_output
 
-def page_width_to_px(page: fitz.Page, clamp_min=720, clamp_max=1200) -> int:
-    """Convert page rect width (points) to CSS px and clamp, returning integer px."""
-    rect = page.rect
-    pt_width = rect.width  # points (1/72 inch)
-    # convert points to px: px = pt * (96 / 72) = pt * 1.3333333
-    px = int(round(pt_width * 96.0 / 72.0))
-    # clamp to reasonable bounds for preview
-    px = max(clamp_min, min(px, clamp_max))
-    return px
-
-# --- process PDF (keeps doc open to avoid 'document closed') -----------------
-try:
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        n = doc.page_count
-        all_pages = []
-        progress = st.progress(0)
-        status = st.empty()
-        page_max_px = 980  # fallback if first page missing
-        for i in range(n):
-            status.info(f"Extracting page {i+1}/{n} …")
-            page = doc.load_page(i)
-            lines = extract_lines_from_page(page)
-            # normalize each line
-            lines = [normalize_line(s) for s in lines]
-            # compute px width from first page
-            if i == 0:
-                page_max_px = page_width_to_px(page)
-            all_pages.append(lines)
-            progress.progress((i+1)/n)
-        status.success("Extraction finished.")
-except Exception as e:
-    st.exception(e)
-    st.stop()
-
-# --- build HTML ----------------------------------------------------------------
-title = (upload.name or "Judgment").rsplit(".", 1)[0]
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-font_family = "monospace" if mono else "Georgia, 'Times New Roman', serif"
-
-# CSS tuned to reduce large right gaps and enable justification + hyphenation
-css = f"""
-<style>
-  :root {{ --bg: #ffffff; --meta:#f6f7f8; }}
-  html,body{{ margin:0;padding:0;background:var(--bg);color:#111;font-family:{font_family}; }}
-  .doc-meta{{font:12px/1.4 system-ui, sans-serif;color:#444;background:var(--meta);padding:10px 14px;border-bottom:1px solid #e5e7eb}}
-  .container{{padding:18px;}}
-  .page-wrap{{ margin: 18px auto 36px; max-width: {page_max_px}px; }}
-  .para{{ text-align: justify; text-justify: inter-word; hyphens: auto; font-size:{font_size}px; line-height:1.48; margin:8px 0; }}
-  .numbered{{ font-weight: 600; }} /* small emphasis to numbering starts if needed */
-  .page-sep{{ height: 28px; }}
-  /* preserve exact-lines mode fallback */
-  .prepage {{ white-space: pre-wrap; font-size:{font_size}px; line-height:1.45; }}
-  /* avoid too wide lines on very large screens */
-  @media (min-width:1400px) {{
-    .page-wrap {{ max-width: {min(page_max_px, 1100)}px; }}
-  }}
-</style>
-"""
-
-def paragraphs_to_html(paragraphs: List[str]) -> str:
-    html_p = []
-    for p in paragraphs:
-        # If paragraph begins with a numbering token, add small class to help visual separation
-        p_escaped = html.escape(p)
-        if re.match(r'^\s*(?:\d+[\.\)]|[ivxlcdmIVXLCDM]+\)|\([ivxlcdmIVXLCDM]+\)|\([a-z]\)|[A-Z]\.)', p):
-            html_p.append(f'<div class="para numbered">{p_escaped}</div>')
-        else:
-            html_p.append(f'<div class="para">{p_escaped}</div>')
-    return "\n".join(html_p)
-
-pages_html = []
-for page_lines in all_pages:
-    if keep_lines:
-        # show original extracted lines inside pre-wrap
-        page_text = "\n".join(page_lines).rstrip()
-        pages_html.append(f'<div class="page-wrap"><pre class="prepage">{html.escape(page_text)}</pre></div>')
+def main():
+    st.title("⚖️ Legal Judgment Text Extractor")
+    st.markdown("---")
+    st.markdown("**Extract and preserve the original formatting of legal judgments from PDF files**")
+    
+    # Sidebar
+    st.sidebar.header("📋 Extraction Settings")
+    
+    # Extraction method selection
+    extraction_method = st.sidebar.selectbox(
+        "Choose Extraction Method:",
+        ["PDFPlumber (Recommended)", "PyMuPDF", "PyPDF2"],
+        help="PDFPlumber generally provides the best layout preservation for legal documents"
+    )
+    
+    # File upload
+    uploaded_file = st.file_uploader(
+        "Upload Legal Judgment PDF",
+        type=['pdf'],
+        help="Upload a PDF file of a legal judgment"
+    )
+    
+    if uploaded_file is not None:
+        # Display file info
+        st.info(f"📄 **File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB")
+        
+        # Create extractor instance
+        extractor = LegalJudgmentExtractor()
+        
+        # Process button
+        if st.button("🔍 Extract Text", type="primary"):
+            with st.spinner("Extracting text from PDF..."):
+                try:
+                    # Process the PDF
+                    extracted_text, html_output = extractor.process_pdf(uploaded_file, extraction_method)
+                    
+                    if extracted_text:
+                        st.success("✅ Text extraction completed successfully!")
+                        
+                        # Create tabs for different views
+                        tab1, tab2, tab3, tab4 = st.tabs(["📋 Raw Text", "🌐 HTML Preview", "💾 Download HTML", "📊 Statistics"])
+                        
+                        with tab1:
+                            st.subheader("Extracted Raw Text")
+                            st.text_area(
+                                "Raw extracted text with preserved formatting:",
+                                value=extracted_text,
+                                height=600,
+                                help="This shows the extracted text with original spacing and formatting preserved"
+                            )
+                        
+                        with tab2:
+                            st.subheader("HTML Preview")
+                            st.markdown("**Preview of the formatted HTML output:**")
+                            
+                            # Display HTML preview
+                            st.components.v1.html(html_output, height=800, scrolling=True)
+                        
+                        with tab3:
+                            st.subheader("Download Options")
+                            
+                            # Create download buttons
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                # Download as HTML
+                                html_bytes = html_output.encode('utf-8')
+                                st.download_button(
+                                    label="📄 Download HTML File",
+                                    data=html_bytes,
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_extracted.html",
+                                    mime="text/html"
+                                )
+                            
+                            with col2:
+                                # Download as TXT
+                                txt_bytes = extracted_text.encode('utf-8')
+                                st.download_button(
+                                    label="📝 Download Text File",
+                                    data=txt_bytes,
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_extracted.txt",
+                                    mime="text/plain"
+                                )
+                        
+                        with tab4:
+                            st.subheader("Document Statistics")
+                            
+                            # Calculate statistics
+                            lines = extracted_text.split('\n')
+                            words = extracted_text.split()
+                            characters = len(extracted_text)
+                            non_empty_lines = [line for line in lines if line.strip()]
+                            
+                            # Numbering pattern analysis
+                            patterns = extractor.detect_numbering_patterns(extracted_text)
+                            
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                st.metric("Total Lines", len(lines))
+                                st.metric("Non-empty Lines", len(non_empty_lines))
+                            
+                            with col2:
+                                st.metric("Total Words", len(words))
+                                st.metric("Total Characters", characters)
+                            
+                            with col3:
+                                st.metric("Numbering Patterns", len(set(p[1] for p in patterns)))
+                                st.metric("Pages Detected", extracted_text.count("PAGE BREAK") + 1)
+                            
+                            # Show detected patterns
+                            if patterns:
+                                st.subheader("Detected Numbering Patterns")
+                                pattern_types = list(set(p[1] for p in patterns))
+                                for pattern_type in pattern_types:
+                                    st.write(f"• **{pattern_type.replace('-', ' ').title()}**")
+                    
+                    else:
+                        st.error("❌ Failed to extract text from the PDF. Please try a different extraction method or check if the PDF is text-based.")
+                
+                except Exception as e:
+                    st.error(f"❌ An error occurred during text extraction: {str(e)}")
+    
     else:
-        paras = reconstruct_paragraphs(page_lines)
-        page_html = paragraphs_to_html(paras)
-        pages_html.append(f'<div class="page-wrap">{page_html}</div>')
+        # Show sample format
+        st.markdown("### 📖 Sample Legal Judgment Format")
+        st.markdown("The tool preserves formatting like this:")
+        
+        sample_text = """OMP (I) Comm. No. 800/20
+HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
+13.02.2020
 
-pages_joined = "\n<div class='page-sep'></div>\n".join(pages_html)
+Present : Sh. Ashok Kumar Ld. Counsel for petitioner.
 
-final_html = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>{html.escape(title)}</title>
-{css}
-</head>
-<body>
-  <div class="doc-meta">Generated by Judgment → HTML (improved) on {now} — source: {html.escape(upload.name or '')}</div>
-  <div class="container">
-    {pages_joined}
-  </div>
-</body>
-</html>
-"""
+This is a petition u/s 9 of Indian Arbitration and Conciliation Act
+1996 for issuing interim measure by way of appointment of receiver...
 
-# Preview + download
-st.subheader("Preview (improved)")
-st.components.v1.html(final_html, height=900, scrolling=True)
-st.download_button("⬇️ Download improved HTML", data=final_html.encode("utf-8"),
-                   file_name=f"{title}_improved.html", mime="text/html")
+(i) The receiver shall take over the possession of the vehicle
+    from the respondent at the address given in the loan application.
 
-st.info("If you still see uneven right-side gaps, try toggling 'Keep original lines' (shows exact extracted lines) "
-        "and/or toggling 'Aggressive paragraph join'. For scanned PDFs, OCR first.")
+(ii) The receiver shall avoid taking the possession of the vehicle
+     if the vehicle is occupied by a women...
 
+                                    VINAY KUMAR KHANNA
+                                    District Judge
+                           (Commercial Court-02)
+                     South Distt., Saket, New Delhi/13.02.2020"""
+        
+        st.code(sample_text, language=None)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: #666;'>
+            <small>⚖️ Legal Judgment Text Extractor | Preserves original formatting, numbering, and spacing</small>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+if __name__ == "__main__":
+    main()
