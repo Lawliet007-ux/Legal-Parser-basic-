@@ -612,10 +612,32 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-  
+            st.markdown("""
+            **Before: Raw PDF Extract**
+            ```
+            OMP (I) Comm. No. 800/20
+            HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
+            13.02.2020
+            Present : Sh. Ashok Kumar Ld. Counsel for petitioner.
+                            This is a petition u/s 9 of Indian Arbitration and Conciliation Act
+            1996 for issuing interim measure by way of appointment of receiver is received
+            by way of assignment. It be checked and registered.
+            ```
+            """)
         
         with col2:
-          
+            st.markdown("""
+            **After: Smart Formatting**
+            ```
+            OMP (I) Comm. No. 800/20
+            HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
+            13.02.2020
+            
+            Present: Sh. Ashok Kumar Ld. Counsel for petitioner.
+            
+            This is a petition u/s 9 of Indian Arbitration and Conciliation Act 1996 for issuing interim measure by way of appointment of receiver is received by way of assignment. It be checked and registered.
+            ```
+            """)
 
 if __name__ == "__main__":
     main()
