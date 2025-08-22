@@ -432,33 +432,7 @@ def main():
     st.subheader("📖 Sample Judgment Preview")
     st.markdown("Here's how a typical judgment would look after processing:")
     
-    # Sample HTML from the provided judgment
-    sample_html = """
-    <div style="font-family: 'Times New Roman', serif; padding: 20px; background: white; border: 1px solid #ddd;">
-        <div style="text-align: center; font-weight: bold; margin: 10px 0;">
-            OMP (I) Comm. No. 800/20
-        </div>
-        <div style="text-align: center; font-weight: bold; text-decoration: underline; margin: 10px 0;">
-            HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
-        </div>
-        <div style="text-align: center; margin: 10px 0;">
-            13.02.2020
-        </div>
-        <div style="margin: 15px 0; text-align: justify;">
-            This is a petition u/s 9 of Indian Arbitration and Conciliation Act 1996 for issuing interim measure by way of appointment of receiver...
-        </div>
-        <div style="font-weight: bold; margin: 10px 0; padding-left: 20px; text-indent: -20px;">
-            (i) The receiver shall take over the possession of the vehicle from the respondent at the address given in the loan application.
-        </div>
-        <div style="text-align: right; font-weight: bold; margin-top: 30px;">
-            VINAY KUMAR KHANNA<br>
-            District Judge<br>
-            (Commercial Court-02) South Distt., Saket, New Delhi/13.02.2020
-        </div>
-    </div>
-    """
     
-    st.components.v1.html(sample_html, height=400)
     
     # Technical details
     st.markdown("---")
@@ -466,25 +440,8 @@ def main():
     
     with st.expander("Processing Capabilities", expanded=False):
         st.markdown("""
-        ### Text Extraction Methods:
-        - **PDFPlumber**: Better for complex layouts, tables, and formatting preservation
-        - **PyPDF2**: Faster processing, good for simple text extraction
-        
-        ### Supported Features:
-        - Roman numerals (I, II, III, IV, etc.)
-        - Numbered lists (1. 2. 3. etc.)
-        - Parenthetical numbering ((1) (2) (3) etc.)
-        - Lettered points ((a) (b) (c) etc.)
-        - Sub-points ((i) (ii) (iii) etc.)
-        - Paragraph formatting
-        - Judge signatures and court details
-        
-        ### Scalability:
-        - Designed for batch processing
-        - Memory-efficient extraction
-        - Error handling for corrupt PDFs
-        - Support for various district court formats
         """)
 
 if __name__ == "__main__":
     main()
+
