@@ -1,6 +1,7 @@
 streamlit
-pymupdf
-jinja2
-PyPDF2 
 pdfplumber
-
+PyPDF2
+pdfminer.six
+pillow
+pytesseract
+pdf2image
