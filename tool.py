@@ -4,67 +4,69 @@ import fitz  # PyMuPDF
 import pdfplumber
 import re
 from io import BytesIO
-import base64
 from typing import List, Tuple, Dict
 import unicodedata
 
 # Page configuration
 st.set_page_config(
-    page_title="Legal Judgment Text Extractor - Enhanced",
+    page_title="Improved Legal Judgment Extractor",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-class EnhancedLegalExtractor:
+class ImprovedLegalExtractor:
     def __init__(self):
         self.extracted_text = ""
         self.html_output = ""
     
     def clean_text(self, text: str) -> str:
-        """Clean and normalize text while preserving structure"""
+        """Clean and normalize text"""
         # Remove problematic characters
         text = text.replace('Â­', '-')
-        text = text.replace('\u00ad', '-')
-        text = text.replace('\ufeff', '')
-        text = text.replace('\u200b', '')
+        text = text.replace('\u00ad', '-')  # soft hyphen
+        text = text.replace('\ufeff', '')   # BOM
+        text = text.replace('\u200b', '')   # zero-width space
+        text = text.replace('\x0c', '\n\n[PAGE_BREAK]\n\n')  # form feed
         
         # Normalize unicode
         text = unicodedata.normalize('NFKC', text)
         
         return text
     
-    def extract_with_layout_preservation(self, pdf_file) -> str:
-        """Extract text while preserving original layout using pdfplumber"""
+    def extract_with_pdfplumber(self, pdf_file) -> str:
+        """Extract text using pdfplumber with better layout handling"""
         try:
+            pdf_file.seek(0)
             with pdfplumber.open(pdf_file) as pdf:
                 full_text = ""
                 for page_num, page in enumerate(pdf.pages):
-                    # Extract text with better layout preservation
+                    # Get text blocks to preserve structure better
                     text = page.extract_text(
                         layout=True,
-                        x_tolerance=1,
-                        y_tolerance=1,
-                        keep_blank_chars=True
+                        x_tolerance=2,
+                        y_tolerance=3
                     )
+                    
                     if text:
                         full_text += text
                         if page_num < len(pdf.pages) - 1:
                             full_text += "\n\n[PAGE_BREAK]\n\n"
+                
                 return self.clean_text(full_text)
         except Exception as e:
-            st.error(f"Error with pdfplumber: {str(e)}")
+            st.error(f"PDFPlumber error: {str(e)}")
             return ""
     
-    def extract_text_pymupdf(self, pdf_file) -> str:
-        """Extract text using PyMuPDF with layout preservation"""
+    def extract_with_pymupdf(self, pdf_file) -> str:
+        """Extract text using PyMuPDF"""
         try:
+            pdf_file.seek(0)
             pdf_document = fitz.open(stream=pdf_file.read(), filetype="pdf")
             full_text = ""
             
             for page_num in range(pdf_document.page_count):
                 page = pdf_document.get_page(page_num)
-                # Use layout preservation mode
                 text = page.get_text("text")
                 full_text += text
                 
@@ -74,12 +76,13 @@ class EnhancedLegalExtractor:
             pdf_document.close()
             return self.clean_text(full_text)
         except Exception as e:
-            st.error(f"Error with PyMuPDF: {str(e)}")
+            st.error(f"PyMuPDF error: {str(e)}")
             return ""
     
-    def extract_text_pypdf2(self, pdf_file) -> str:
+    def extract_with_pypdf2(self, pdf_file) -> str:
         """Extract text using PyPDF2"""
         try:
+            pdf_file.seek(0)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
             full_text = ""
             
@@ -91,102 +94,184 @@ class EnhancedLegalExtractor:
             
             return self.clean_text(full_text)
         except Exception as e:
-            st.error(f"Error with PyPDF2: {str(e)}")
+            st.error(f"PyPDF2 error: {str(e)}")
             return ""
     
-    def smart_line_joining(self, text: str) -> str:
-        """Intelligently join lines that are clearly broken mid-sentence"""
+    def intelligent_line_reconstruction(self, text: str) -> str:
+        """Intelligently reconstruct paragraphs and preserve structure"""
         lines = text.split('\n')
-        processed_lines = []
+        reconstructed = []
         i = 0
         
         while i < len(lines):
             current_line = lines[i].strip()
             
-            # Skip empty lines and page breaks
-            if not current_line or '[PAGE_BREAK]' in current_line:
-                processed_lines.append(lines[i])
+            # Handle empty lines and page breaks
+            if not current_line:
+                # Don't add too many consecutive empty lines
+                if not reconstructed or reconstructed[-1].strip():
+                    reconstructed.append('')
                 i += 1
                 continue
             
-            # Look ahead to see if next line should be joined
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
+            if '[PAGE_BREAK]' in current_line:
+                reconstructed.append(current_line)
+                i += 1
+                continue
+            
+            # Check if this line should be joined with next lines
+            paragraph_lines = [current_line]
+            i += 1
+            
+            while i < len(lines):
+                next_line = lines[i].strip()
                 
-                # Join if current line doesn't end with sentence-ending punctuation
-                # and next line doesn't start with special patterns
+                # Stop conditions for paragraph building
+                if not next_line:  # Empty line ends paragraph
+                    break
+                if '[PAGE_BREAK]' in next_line:  # Page break ends paragraph
+                    break
+                if self.is_structural_element(next_line):  # Structural elements end paragraph
+                    break
+                if self.starts_new_section(next_line):  # New sections end paragraph
+                    break
+                
+                # Join conditions
                 should_join = (
-                    current_line and next_line and
-                    not current_line.endswith(('.', ':', '?', '!')) and
-                    not next_line[0].isupper() and
-                    not re.match(r'^\([ivxlcdm]+\)', next_line.lower()) and
-                    not re.match(r'^\d+\.', next_line) and
-                    not next_line.startswith('Present:') and
-                    not (' VS ' in next_line.upper() or ' V/S ' in next_line.upper()) and
-                    not re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}', next_line)
+                    not current_line.endswith(('.', ':', '!', '?')) or  # Incomplete sentence
+                    (current_line.endswith('.') and not next_line[0].isupper() and 
+                     not re.match(r'^\d+\.', next_line))  # Abbreviation or number
                 )
                 
-                if should_join:
-                    # Join with single space
-                    processed_lines.append(current_line + ' ' + next_line)
-                    i += 2
-                else:
-                    processed_lines.append(lines[i])
+                if should_join and not self.is_numbered_point(next_line):
+                    paragraph_lines.append(next_line)
+                    current_line = next_line  # Update for next iteration
                     i += 1
+                else:
+                    break
+            
+            # Join the paragraph lines
+            if len(paragraph_lines) == 1:
+                reconstructed.append(paragraph_lines[0])
             else:
-                processed_lines.append(lines[i])
-                i += 1
+                # Join with single spaces, preserve some structure
+                joined = ' '.join(paragraph_lines)
+                reconstructed.append(joined)
         
-        return '\n'.join(processed_lines)
+        return '\n'.join(reconstructed)
     
-    def detect_text_patterns(self, line: str) -> str:
-        """Detect text patterns for minimal classification"""
-        stripped = line.strip()
+    def is_structural_element(self, line: str) -> bool:
+        """Check if line is a structural element (headers, case info, etc.)"""
+        line_upper = line.upper()
         
-        if not stripped:
+        # Case numbers and court info
+        if re.match(r'^[A-Z\s]*\([A-Z]+\).*No\.?\s*\d+', line):
+            return True
+        
+        # Party names (VS, V/S patterns)
+        if ' VS ' in line_upper or ' V/S ' in line_upper or ' V. ' in line_upper:
+            return True
+        
+        # Dates
+        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', line):
+            return True
+        
+        # Present, coram, etc.
+        if re.match(r'^(Present|Coram|Before)\s*:', line, re.IGNORECASE):
+            return True
+        
+        # Page numbers
+        if re.match(r'^:\d+:$', line) or re.match(r'^\d+$', line.strip()):
+            return True
+        
+        # Judge names and titles
+        if line_upper in ['DISTRICT JUDGE', 'ADDITIONAL DISTRICT JUDGE', 'CHIEF JUDICIAL MAGISTRATE']:
+            return True
+        
+        return False
+    
+    def starts_new_section(self, line: str) -> bool:
+        """Check if line starts a new section"""
+        # Numbered paragraphs
+        if re.match(r'^\d+\.', line.strip()):
+            return True
+        
+        # Roman numerals
+        if re.match(r'^\([ivxlcdm]+\)', line.lower().strip()):
+            return True
+        
+        # Lettered points
+        if re.match(r'^\([a-z]\)', line.lower().strip()):
+            return True
+        
+        # "Heard." or similar court language
+        if line.strip() in ['Heard.', 'Heard:', 'ORDER', 'JUDGMENT', 'REASONING']:
+            return True
+        
+        return False
+    
+    def is_numbered_point(self, line: str) -> bool:
+        """Check if line is a numbered point or sub-point"""
+        return (
+            re.match(r'^\d+\.', line.strip()) or
+            re.match(r'^\([a-z]+\)', line.strip()) or
+            re.match(r'^\([ivxlcdm]+\)', line.lower().strip())
+        )
+    
+    def detect_element_type(self, line: str) -> str:
+        """Detect the type of content element"""
+        if not line.strip():
             return "empty"
         
-        if '[PAGE_BREAK]' in stripped:
+        if '[PAGE_BREAK]' in line:
             return "page_break"
         
-        # Very specific patterns only
-        if re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', stripped):
-            return "case_header"
+        # Case number
+        if re.match(r'^[A-Z\s]*\([A-Z]+\).*No\.?\s*\d+', line):
+            return "case_number"
         
-        if (' VS ' in stripped.upper() or ' V/S ' in stripped.upper()) and len(stripped.split()) <= 15:
-            return "party_names"
+        # Party names
+        if (' VS ' in line.upper() or ' V/S ' in line.upper() or ' V. ' in line.upper()) and len(line.split()) < 20:
+            return "parties"
         
-        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
+        # Date
+        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', line.strip()):
             return "date"
         
-        if re.match(r'^Present\s*:', stripped, re.IGNORECASE):
+        # Present/Coram
+        if re.match(r'^(Present|Coram|Before)\s*:', line, re.IGNORECASE):
             return "present"
         
-        if re.match(r'^:\d+:$', stripped):
+        # Page numbers
+        if re.match(r'^:\d+:$', line.strip()):
             return "page_number"
         
-        # Judge signature at end
-        if stripped.upper() in ['DISTRICT JUDGE', 'ADDITIONAL DISTRICT JUDGE', 'CHIEF JUDICIAL MAGISTRATE']:
+        # Judge signature area
+        if line.strip().upper() in ['DISTRICT JUDGE', 'ADDITIONAL DISTRICT JUDGE', 'CHIEF JUDICIAL MAGISTRATE']:
             return "judge_title"
         
-        # Court location with date
-        if re.match(r'^.*New Delhi/\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
-            return "court_location"
+        # Location and date at end
+        if re.match(r'.+New Delhi/\d{1,2}\.\d{1,2}\.\d{4}$', line.strip()):
+            return "location_date"
         
-        # All caps names (likely signatures) - be very conservative
-        if (stripped.isupper() and 
-            len(stripped.split()) <= 4 and 
-            len(stripped) >= 10 and
-            stripped.replace(' ', '').isalpha()):
+        # All caps names (signatures) - be more selective
+        if (line.strip().isupper() and 
+            3 <= len(line.strip().split()) <= 4 and 
+            line.strip().replace(' ', '').isalpha() and
+            len(line.strip()) > 8):
             return "signature"
         
-        return "regular"
+        # Numbered paragraphs
+        if re.match(r'^\d+\.', line.strip()) or re.match(r'^\([a-z]+\)', line.strip()):
+            return "numbered"
+        
+        return "paragraph"
     
-    def convert_to_clean_html(self, text: str) -> str:
-        """Convert to HTML with minimal, clean formatting"""
+    def create_clean_html(self, text: str) -> str:
+        """Create clean HTML with proper formatting"""
         lines = text.split('\n')
         
-        html_content = ['''<!DOCTYPE html>
+        html_parts = ['''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -196,60 +281,81 @@ class EnhancedLegalExtractor:
         body {
             font-family: 'Times New Roman', serif;
             font-size: 12pt;
-            line-height: 1.3;
+            line-height: 1.4;
             margin: 0;
             padding: 20px;
-            background-color: #ffffff;
-            color: #000000;
+            background: #f5f5f5;
+            color: #000;
         }
         
-        .judgment-container {
+        .document {
             max-width: 210mm;
             margin: 0 auto;
             padding: 25mm;
             background: white;
             box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            min-height: 297mm;
         }
         
-        .line {
-            margin: 0;
-            padding: 0;
-            min-height: 1.3em;
-        }
-        
-        .case-header {
+        .case-number {
             text-align: center;
             font-weight: bold;
+            margin: 20px 0;
+            font-size: 13pt;
         }
         
-        .party-names {
+        .parties {
             text-align: center;
             font-weight: bold;
+            margin: 15px 0;
+            text-decoration: underline;
         }
         
         .date {
             text-align: center;
+            margin: 15px 0;
         }
         
         .present {
-            margin-top: 1em;
+            margin: 15px 0;
+            font-weight: bold;
+        }
+        
+        .paragraph {
+            margin: 10px 0;
+            text-align: justify;
+            line-height: 1.5;
+        }
+        
+        .numbered {
+            margin: 10px 0;
+            text-align: justify;
+            line-height: 1.5;
+            padding-left: 20px;
+            text-indent: -20px;
         }
         
         .page-number {
             text-align: center;
-        }
-        
-        .judge-title {
-            text-align: right;
+            margin: 10px 0;
             font-weight: bold;
         }
         
         .signature {
             text-align: right;
+            font-weight: bold;
+            margin: 10px 0;
         }
         
-        .court-location {
+        .judge-title {
             text-align: right;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+        
+        .location-date {
+            text-align: right;
+            margin: 5px 0;
         }
         
         .page-break {
@@ -257,11 +363,13 @@ class EnhancedLegalExtractor:
             text-align: center;
             color: #666;
             font-style: italic;
-            margin: 2em 0;
+            margin: 20px 0;
+            border-top: 1px dashed #ccc;
+            padding-top: 10px;
         }
         
         .empty {
-            height: 1.3em;
+            height: 12pt;
         }
         
         @media print {
@@ -270,208 +378,198 @@ class EnhancedLegalExtractor:
                 padding: 0;
                 background: white;
             }
-            .judgment-container { 
+            .document { 
                 margin: 0; 
                 padding: 20mm;
                 box-shadow: none;
+                min-height: auto;
             }
             .page-break {
+                border: none;
                 margin: 0;
+                padding: 0;
                 font-size: 0;
-                height: 0;
             }
         }
     </style>
 </head>
 <body>
-    <div class="judgment-container">''']
+    <div class="document">''']
+        
+        consecutive_empty = 0
         
         for line in lines:
-            content_type = self.detect_text_patterns(line)
+            element_type = self.detect_element_type(line)
             
-            if content_type == "empty":
-                html_content.append('<div class="line empty"></div>')
-            elif content_type == "page_break":
-                html_content.append('<div class="page-break">--- Page Break ---</div>')
+            if element_type == "empty":
+                consecutive_empty += 1
+                if consecutive_empty <= 2:  # Limit consecutive empty lines
+                    html_parts.append('        <div class="empty"></div>')
+                continue
             else:
-                # Escape HTML characters
-                escaped_content = (line.replace('&', '&amp;')
-                                 .replace('<', '&lt;')
-                                 .replace('>', '&gt;')
-                                 .replace('"', '&quot;'))
-                
-                # Apply minimal formatting based on content type
+                consecutive_empty = 0
+            
+            # Escape HTML
+            escaped = (line.replace('&', '&amp;')
+                          .replace('<', '&lt;')
+                          .replace('>', '&gt;')
+                          .replace('"', '&quot;'))
+            
+            if element_type == "page_break":
+                html_parts.append('        <div class="page-break">--- Page Break ---</div>')
+            else:
                 css_class = {
-                    "case_header": "line case-header",
-                    "party_names": "line party-names", 
-                    "date": "line date",
-                    "present": "line present",
-                    "page_number": "line page-number",
-                    "judge_title": "line judge-title",
-                    "signature": "line signature",
-                    "court_location": "line court-location",
-                    "regular": "line"
-                }.get(content_type, "line")
+                    "case_number": "case-number",
+                    "parties": "parties",
+                    "date": "date", 
+                    "present": "present",
+                    "paragraph": "paragraph",
+                    "numbered": "numbered",
+                    "page_number": "page-number",
+                    "signature": "signature",
+                    "judge_title": "judge-title",
+                    "location_date": "location-date"
+                }.get(element_type, "paragraph")
                 
-                html_content.append(f'<div class="{css_class}">{escaped_content}</div>')
+                html_parts.append(f'        <div class="{css_class}">{escaped}</div>')
         
-        html_content.append('''    </div>
+        html_parts.append('''    </div>
 </body>
 </html>''')
         
-        return '\n'.join(html_content)
+        return '\n'.join(html_parts)
     
-    def preserve_original_spacing(self, text: str) -> str:
-        """Preserve original spacing and indentation"""
-        lines = text.split('\n')
-        preserved_lines = []
-        
-        for line in lines:
-            # Keep original spacing, only clean obvious artifacts
-            if line.strip():
-                preserved_lines.append(line.rstrip())  # Remove trailing spaces only
-            else:
-                preserved_lines.append('')  # Keep empty lines
-        
-        return '\n'.join(preserved_lines)
-    
-    def process_pdf_enhanced(self, pdf_file, extraction_method: str) -> Tuple[str, str]:
-        """Enhanced PDF processing with better structure preservation"""
-        pdf_file.seek(0)
-        
-        # Extract text based on method
-        if extraction_method == "PDFPlumber (Layout Preserved)":
-            extracted_text = self.extract_with_layout_preservation(pdf_file)
-        elif extraction_method == "PyMuPDF":
-            extracted_text = self.extract_text_pymupdf(pdf_file)
+    def process_pdf(self, pdf_file, method: str) -> Tuple[str, str]:
+        """Main processing function"""
+        # Extract raw text
+        if method == "PDFPlumber":
+            raw_text = self.extract_with_pdfplumber(pdf_file)
+        elif method == "PyMuPDF": 
+            raw_text = self.extract_with_pymupdf(pdf_file)
         else:
-            extracted_text = self.extract_text_pypdf2(pdf_file)
+            raw_text = self.extract_with_pypdf2(pdf_file)
         
-        if not extracted_text:
+        if not raw_text:
             return "", ""
         
-        # Smart line joining (minimal)
-        processed_text = self.smart_line_joining(extracted_text)
+        # Reconstruct text intelligently
+        processed_text = self.intelligent_line_reconstruction(raw_text)
         
-        # Preserve original spacing
-        final_text = self.preserve_original_spacing(processed_text)
+        # Create HTML
+        html_output = self.create_clean_html(processed_text)
         
-        # Convert to HTML with clean formatting
-        html_output = self.convert_to_clean_html(final_text)
-        
-        return final_text, html_output
+        return processed_text, html_output
 
 def main():
-    st.title("Enhanced Legal Judgment Text Extractor")
+    st.title("🏛️ Improved Legal Judgment Extractor")
     st.markdown("---")
-    st.markdown("**Preserves exact PDF structure with minimal processing**")
+    st.markdown("**Smart text reconstruction with better paragraph handling**")
     
     # Sidebar
     with st.sidebar:
-        st.header("Extraction Settings")
+        st.header("⚙️ Extraction Settings")
         
-        extraction_method = st.selectbox(
-            "Extraction Method:",
-            ["PDFPlumber (Layout Preserved)", "PyMuPDF", "PyPDF2"],
-            help="Choose the PDF text extraction method"
+        method = st.selectbox(
+            "PDF Extraction Method:",
+            ["PDFPlumber", "PyMuPDF", "PyPDF2"],
+            help="Choose extraction method based on your PDF quality"
         )
         
-        st.markdown("### New Approach")
+        st.markdown("### 🎯 New Approach")
         st.markdown("""
-        - **Layout Preservation**: Maintains exact spacing
-        - **Minimal Processing**: Only essential line joining
-        - **Clean HTML**: Simple, readable formatting
-        - **No Over-formatting**: Preserves original appearance
-        - **Smart Detection**: Minimal pattern recognition
+        - **Smart Line Joining**: Intelligently reconstructs paragraphs
+        - **Structure Preservation**: Maintains legal document formatting
+        - **Reduced Empty Lines**: Eliminates excessive spacing
+        - **Better Pattern Recognition**: Improved content classification
+        - **Clean HTML Output**: Professional document appearance
         """)
         
-        st.markdown("### Key Improvements")
+        st.markdown("### 🔧 Key Improvements")
         st.markdown("""
-        - Better spacing preservation
-        - Reduced bold text usage
-        - Proper indentation handling
-        - Cleaner line breaks
-        - More accurate structure
+        - Paragraph reconstruction logic
+        - Structural element detection
+        - Reduced over-formatting
+        - Better spacing control
+        - Professional HTML styling
         """)
     
-    # File upload
+    # Main content
     uploaded_file = st.file_uploader(
-        "Upload Legal Judgment PDF",
+        "📄 Upload Legal Judgment PDF",
         type=['pdf'],
         help="Select a PDF file containing a legal judgment"
     )
     
     if uploaded_file is not None:
-        file_details = f"**File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB"
-        st.info(file_details)
+        st.info(f"**File:** {uploaded_file.name} | **Size:** {uploaded_file.size / 1024:.1f} KB")
         
-        extractor = EnhancedLegalExtractor()
+        extractor = ImprovedLegalExtractor()
         
-        col1, col2 = st.columns([2, 1])
+        col1, col2 = st.columns([3, 1])
+        
         with col1:
-            extract_button = st.button("Extract with Enhanced Processing", type="primary", use_container_width=True)
-        with col2:
-            if st.button("Clear Results", use_container_width=True):
-                st.rerun()
+            if st.button("🚀 Extract with Improved Logic", type="primary", use_container_width=True):
+                with st.spinner("Processing with improved algorithms..."):
+                    try:
+                        processed_text, html_output = extractor.process_pdf(uploaded_file, method)
+                        
+                        if processed_text:
+                            st.success("✅ Document processed successfully!")
+                            
+                            # Results tabs
+                            tab1, tab2, tab3 = st.tabs([
+                                "📝 Processed Text",
+                                "🌐 HTML Preview", 
+                                "💾 Downloads"
+                            ])
+                            
+                            with tab1:
+                                st.subheader("Processed Text Output")
+                                st.text_area(
+                                    "Intelligently reconstructed text:",
+                                    value=processed_text,
+                                    height=600,
+                                    help="Text with smart paragraph reconstruction"
+                                )
+                            
+                            with tab2:
+                                st.subheader("HTML Preview")
+                                st.markdown("*Clean, professional formatting:*")
+                                st.components.v1.html(html_output, height=700, scrolling=True)
+                            
+                            with tab3:
+                                st.subheader("Download Files")
+                                
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.download_button(
+                                        label="📄 Download HTML",
+                                        data=html_output.encode('utf-8'),
+                                        file_name=f"{uploaded_file.name.replace('.pdf', '')}_improved.html",
+                                        mime="text/html",
+                                        help="Download professionally formatted HTML"
+                                    )
+                                
+                                with col2:
+                                    st.download_button(
+                                        label="📝 Download Text",
+                                        data=processed_text.encode('utf-8'),
+                                        file_name=f"{uploaded_file.name.replace('.pdf', '')}_improved.txt",
+                                        mime="text/plain",
+                                        help="Download processed text"
+                                    )
+                        
+                        else:
+                            st.error("❌ Failed to extract text. Try a different method.")
+                    
+                    except Exception as e:
+                        st.error(f"❌ Processing error: {str(e)}")
+                        st.info("Try using a different extraction method.")
         
-        if extract_button:
-            with st.spinner("Processing with enhanced layout preservation..."):
-                try:
-                    formatted_text, html_output = extractor.process_pdf_enhanced(uploaded_file, extraction_method)
-                    
-                    if formatted_text:
-                        st.success("Document processed with enhanced structure preservation!")
-                        
-                        # Create tabs
-                        tab1, tab2, tab3 = st.tabs([
-                            "Enhanced Text", 
-                            "Clean HTML Preview", 
-                            "Downloads"
-                        ])
-                        
-                        with tab1:
-                            st.subheader("Enhanced Processed Text")
-                            st.text_area(
-                                "Text with enhanced processing:",
-                                value=formatted_text,
-                                height=500,
-                                help="Enhanced structure preservation with minimal processing"
-                            )
-                        
-                        with tab2:
-                            st.subheader("Clean HTML Preview")
-                            st.markdown("*Clean formatting that matches original PDF structure:*")
-                            st.components.v1.html(html_output, height=700, scrolling=True)
-                        
-                        with tab3:
-                            st.subheader("Download Options")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.download_button(
-                                    label="Download Clean HTML",
-                                    data=html_output.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_enhanced.html",
-                                    mime="text/html",
-                                    help="Download HTML with clean formatting"
-                                )
-                            
-                            with col2:
-                                st.download_button(
-                                    label="Download Enhanced Text",
-                                    data=formatted_text.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_enhanced.txt",
-                                    mime="text/plain",
-                                    help="Download text with enhanced processing"
-                                )
-                    
-                    else:
-                        st.error("Failed to extract text from PDF. Please try a different extraction method.")
-                
-                except Exception as e:
-                    st.error(f"Processing error: {str(e)}")
-                    st.info("Try using a different extraction method.")
+        with col2:
+            if st.button("🗑️ Clear", use_container_width=True):
+                st.rerun()
 
 if __name__ == "__main__":
     main()
