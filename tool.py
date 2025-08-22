@@ -43,8 +43,8 @@ class LegalJudgmentExtractor:
                     # Extract text with layout settings optimized for legal documents
                     text = page.extract_text(
                         layout=True, 
-                        x_tolerance=3,  # Slightly more tolerance for character spacing
-                        y_tolerance=3   # Better line detection
+                        x_tolerance=3,
+                        y_tolerance=3
                     )
                     if text:
                         full_text += text
@@ -92,10 +92,72 @@ class LegalJudgmentExtractor:
             st.error(f"Error with PyPDF2: {str(e)}")
             return ""
     
-    def reconstruct_paragraphs(self, text: str) -> str:
-        """Intelligently reconstruct paragraphs from fragmented lines"""
+    def get_line_type(self, line: str) -> str:
+        """Improved line type detection with better accuracy"""
+        stripped = line.strip()
+        
+        if not stripped:
+            return "empty"
+        
+        # Case number patterns - more specific
+        if re.match(r'^[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+/?\d*$', stripped):
+            return "case_number"
+        
+        # Date patterns
+        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
+            return "date"
+        
+        # Present statement
+        if re.match(r'^Present\s*:', stripped, re.IGNORECASE):
+            return "present"
+        
+        # Page markers like :2:, :3:
+        if re.match(r'^:\d+:$', stripped):
+            return "page_marker"
+        
+        # Ordered list items with Roman numerals in parentheses
+        if re.match(r'^\([ivxlcdm]+\)\s+', stripped, re.IGNORECASE):
+            return "numbering"
+        
+        # Ordered list items with letters in parentheses
+        if re.match(r'^\([a-z]\)\s+', stripped):
+            return "numbering"
+        
+        # Numbered list items
+        if re.match(r'^\d+\.\s+', stripped):
+            return "numbering"
+        
+        # Sub-numbered items like 1.1, 2.3 etc
+        if re.match(r'^\d+\.\d+', stripped):
+            return "numbering"
+        
+        # VS patterns (party names)
+        if ' VS ' in stripped.upper() or ' V/S ' in stripped.upper() or ' V. ' in stripped.upper():
+            return "header"
+        
+        # Judge signatures - more restrictive
+        judge_patterns = [
+            r'^[A-Z\s]+JUDGE$',
+            r'^\([A-Za-z\s\-]+Court[^)]*\)$',
+            r'^District Judge$',
+            r'^Additional District Judge$',
+            r'^[A-Z\s]+DISTRICT JUDGE$'
+        ]
+        
+        for pattern in judge_patterns:
+            if re.match(pattern, stripped, re.IGNORECASE):
+                return "signature"
+        
+        # Location and date signature patterns
+        if re.match(r'^[A-Za-z\s,]+/\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
+            return "signature"
+        
+        return "paragraph"
+    
+    def smart_paragraph_reconstruction(self, text: str) -> str:
+        """Intelligently reconstruct paragraphs with better logic"""
         lines = text.split('\n')
-        reconstructed_lines = []
+        processed_lines = []
         current_paragraph = []
         
         i = 0
@@ -105,142 +167,137 @@ class LegalJudgmentExtractor:
             # Handle empty lines
             if not line:
                 if current_paragraph:
-                    reconstructed_lines.append(' '.join(current_paragraph))
+                    processed_lines.append(' '.join(current_paragraph))
                     current_paragraph = []
-                reconstructed_lines.append('')
+                processed_lines.append('')
                 i += 1
                 continue
             
-            # Handle special markers
+            # Handle page breaks
             if '[PAGE_BREAK]' in line:
                 if current_paragraph:
-                    reconstructed_lines.append(' '.join(current_paragraph))
+                    processed_lines.append(' '.join(current_paragraph))
                     current_paragraph = []
-                reconstructed_lines.append(line)
+                processed_lines.append(line)
                 i += 1
                 continue
             
-            # Detect different line types
             line_type = self.get_line_type(line)
             
             # Lines that should stand alone
-            if line_type in ['case_number', 'header', 'date', 'present', 'numbering', 'signature', 'page_marker']:
+            if line_type in ['case_number', 'header', 'date', 'present', 'signature', 'page_marker']:
                 if current_paragraph:
-                    reconstructed_lines.append(' '.join(current_paragraph))
+                    processed_lines.append(' '.join(current_paragraph))
                     current_paragraph = []
-                reconstructed_lines.append(line)
+                processed_lines.append(line)
                 i += 1
+                continue
+            
+            # Numbered/ordered items
+            if line_type == 'numbering':
+                if current_paragraph:
+                    processed_lines.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                
+                # Collect the complete numbered item
+                numbered_content = [line]
+                j = i + 1
+                
+                # Look ahead for continuation lines
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if not next_line:
+                        break
+                    
+                    next_type = self.get_line_type(next_line)
+                    
+                    # If next line is also numbering or special type, stop
+                    if next_type in ['numbering', 'case_number', 'header', 'date', 'present', 'signature', 'page_marker']:
+                        break
+                    
+                    # If line starts with capital and looks like new sentence, stop
+                    if (next_line[0].isupper() and 
+                        len(next_line) > 20 and 
+                        not next_line.lower().startswith(('and', 'or', 'but', 'however', 'therefore', 'thus', 'hence'))):
+                        break
+                    
+                    numbered_content.append(next_line)
+                    j += 1
+                
+                processed_lines.append(' '.join(numbered_content))
+                i = j
                 continue
             
             # Regular paragraph text
             if line_type == 'paragraph':
-                # Check if this line continues from the previous
-                if current_paragraph and not line[0].isupper():
-                    # Likely continuation of previous sentence
-                    current_paragraph.append(line)
+                # Check if this is a continuation or new paragraph
+                if current_paragraph:
+                    # Heuristics for continuation vs new paragraph
+                    last_line = current_paragraph[-1] if current_paragraph else ""
+                    
+                    # If last line ended with period and current starts with capital, likely new paragraph
+                    if (last_line.endswith('.') and 
+                        line[0].isupper() and 
+                        len(line) > 10):
+                        processed_lines.append(' '.join(current_paragraph))
+                        current_paragraph = [line]
+                    else:
+                        current_paragraph.append(line)
                 else:
-                    # Start of new paragraph or sentence
-                    if current_paragraph:
-                        reconstructed_lines.append(' '.join(current_paragraph))
                     current_paragraph = [line]
             
             i += 1
         
         # Handle any remaining paragraph
         if current_paragraph:
-            reconstructed_lines.append(' '.join(current_paragraph))
+            processed_lines.append(' '.join(current_paragraph))
         
-        return '\n'.join(reconstructed_lines)
-    
-    def get_line_type(self, line: str) -> str:
-        """Determine the type of a text line"""
-        stripped = line.strip()
-        
-        if not stripped:
-            return "empty"
-        
-        # Case number
-        if re.match(r'[A-Z\s]*\([A-Z]+\)\s*[A-Za-z]*\.?\s*No\.?\s*\d+', stripped):
-            return "case_number"
-        
-        # Date
-        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', stripped):
-            return "date"
-        
-        # Present statement
-        if stripped.startswith('Present'):
-            return "present"
-        
-        # Page markers like :2:, :3:
-        if re.match(r'^:\d+:$', stripped):
-            return "page_marker"
-        
-        # Numbering patterns
-        if re.match(r'^\([ivxlcdm]+\)\s+', stripped, re.IGNORECASE):
-            return "numbering"
-        if re.match(r'^\([a-z]\)\s+', stripped):
-            return "numbering"
-        if re.match(r'^\d+\.\s+', stripped):
-            return "numbering"
-        if re.match(r'^\d+\.\d+', stripped):
-            return "numbering"
-        
-        # Headers (party names with VS)
-        if ' VS ' in stripped.upper() or ' V/S ' in stripped.upper():
-            return "header"
-        
-        # Signatures (judge names, courts, etc.)
-        if any(term in stripped.upper() for term in ['JUDGE', 'COURT', 'DISTRICT', 'MAGISTRATE']):
-            return "signature"
-        
-        # All caps names (likely signatures)
-        if len(stripped) > 8 and stripped.replace(' ', '').isalpha() and stripped.isupper():
-            return "signature"
-        
-        return "paragraph"
+        return '\n'.join(processed_lines)
     
     def normalize_spacing(self, text: str) -> str:
         """Improved spacing normalization"""
         # First reconstruct paragraphs
-        reconstructed = self.reconstruct_paragraphs(text)
+        reconstructed = self.smart_paragraph_reconstruction(text)
         
         lines = reconstructed.split('\n')
         normalized_lines = []
         
+        prev_empty = False
+        
         for line in lines:
             if not line.strip():
-                normalized_lines.append("")
+                # Only add one empty line between content
+                if not prev_empty and normalized_lines:
+                    normalized_lines.append("")
+                prev_empty = True
                 continue
             
-            line_type = self.get_line_type(line)
+            prev_empty = False
+            line_type = self.get_line_type(line.strip())
             
-            # Different handling based on line type
-            if line_type in ['case_number', 'header', 'date', 'signature']:
-                # Center-align these by removing excessive leading spaces
-                cleaned = ' '.join(line.split())
-                normalized_lines.append(cleaned)
-            elif line_type == 'numbering':
-                # Preserve some indentation for numbering
-                # Detect the numbering part and content
-                match = re.match(r'^(\s*\([ivxlcdm]+\)\s*|\s*\([a-z]\)\s*|\s*\d+\.\s*)', line, re.IGNORECASE)
+            # Clean up the line
+            cleaned = ' '.join(line.split())
+            
+            # Add appropriate indentation for numbered items
+            if line_type == 'numbering':
+                # Extract numbering part and content
+                match = re.match(r'^(\([ivxlcdm]+\)|\([a-z]\)|\d+\.)\s*(.*)', cleaned, re.IGNORECASE)
                 if match:
-                    numbering_part = match.group(1).strip()
-                    content_part = line[match.end():].strip()
+                    numbering_part = match.group(1)
+                    content_part = match.group(2)
                     if content_part:
-                        normalized_lines.append(f"    {numbering_part} {content_part}")
+                        cleaned = f"    {numbering_part} {content_part}"
                     else:
-                        normalized_lines.append(f"    {numbering_part}")
+                        cleaned = f"    {numbering_part}"
                 else:
-                    normalized_lines.append(f"    {' '.join(line.split())}")
-            else:
-                # Regular paragraphs
-                cleaned = ' '.join(line.split())
-                normalized_lines.append(cleaned)
+                    cleaned = f"    {cleaned}"
+            
+            normalized_lines.append(cleaned)
         
         return '\n'.join(normalized_lines)
     
     def convert_to_html(self, text: str) -> str:
-        """Convert text to well-formatted HTML"""
+        """Convert text to well-formatted HTML with better structure"""
         lines = text.split('\n')
         
         html_content = ['''<!DOCTYPE html>
@@ -255,17 +312,17 @@ class LegalJudgmentExtractor:
             line-height: 1.6;
             margin: 0;
             padding: 20px;
-            background-color: #f5f5f5;
-            color: #000000;
+            background-color: #f8f9fa;
+            color: #333;
             font-size: 14px;
         }
         
         .judgment-container {
             max-width: 210mm;
             margin: 0 auto;
-            padding: 25mm;
+            padding: 30px;
             background: white;
-            box-shadow: 0 0 15px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             border: 1px solid #ddd;
             min-height: 297mm;
         }
@@ -274,36 +331,42 @@ class LegalJudgmentExtractor:
             text-align: center;
             font-weight: bold;
             font-size: 16px;
-            margin: 15px 0;
+            margin: 20px 0;
+            color: #2c3e50;
         }
         
         .header {
             text-align: center;
             font-weight: bold;
             font-size: 16px;
-            margin: 15px 0 25px 0;
-            border-bottom: 2px solid #000;
+            margin: 20px 0 30px 0;
+            border-bottom: 2px solid #34495e;
             padding-bottom: 15px;
+            color: #2c3e50;
         }
         
         .date {
             text-align: center;
             font-weight: bold;
-            margin: 20px 0;
+            margin: 25px 0;
+            color: #2c3e50;
         }
         
         .present {
-            margin: 20px 0;
+            margin: 25px 0;
             font-weight: bold;
+            color: #2c3e50;
         }
         
         .numbering {
-            margin: 15px 0 8px 0;
-            font-weight: bold;
+            margin: 15px 0;
+            font-weight: 500;
+            text-indent: -20px;
+            padding-left: 20px;
         }
         
         .paragraph {
-            margin: 12px 0;
+            margin: 15px 0;
             text-align: justify;
             line-height: 1.8;
         }
@@ -311,29 +374,31 @@ class LegalJudgmentExtractor:
         .signature {
             text-align: center;
             font-weight: bold;
-            margin: 25px 0 8px 0;
+            margin: 30px 0 10px 0;
+            color: #2c3e50;
         }
         
         .page-marker {
             text-align: center;
             font-weight: bold;
-            margin: 20px 0;
-            font-size: 18px;
+            margin: 25px 0;
+            font-size: 16px;
+            color: #7f8c8d;
         }
         
         .page-break {
             page-break-before: always;
-            border-top: 3px double #333;
-            margin: 50px 0 30px 0;
-            padding-top: 30px;
+            border-top: 2px solid #bdc3c7;
+            margin: 40px 0 20px 0;
+            padding-top: 20px;
             text-align: center;
-            color: #666;
+            color: #7f8c8d;
             font-style: italic;
             font-size: 12px;
         }
         
         .spacing {
-            height: 20px;
+            height: 15px;
         }
         
         /* Enhanced print styles */
@@ -341,6 +406,7 @@ class LegalJudgmentExtractor:
             body { 
                 margin: 0; 
                 background: white;
+                font-size: 12px;
             }
             .judgment-container { 
                 box-shadow: none; 
@@ -351,7 +417,7 @@ class LegalJudgmentExtractor:
             }
             .page-break {
                 border-top: none;
-                margin: 20px 0;
+                margin: 10px 0;
                 font-size: 0;
                 height: 0;
             }
@@ -361,24 +427,17 @@ class LegalJudgmentExtractor:
 <body>
     <div class="judgment-container">''']
         
-        consecutive_empty = 0
-        last_was_numbering = False
-        
         for line in lines:
             stripped = line.strip()
             
-            # Handle empty lines with better logic
+            # Handle empty lines
             if not stripped:
-                consecutive_empty += 1
-                if consecutive_empty == 1:  # Only first empty line
-                    html_content.append('<div class="spacing"></div>')
+                html_content.append('<div class="spacing"></div>')
                 continue
-            else:
-                consecutive_empty = 0
             
             # Handle page breaks
             if '[PAGE_BREAK]' in line:
-                html_content.append('<div class="page-break">--- New Page ---</div>')
+                html_content.append('<div class="page-break">--- Page Break ---</div>')
                 continue
             
             # Detect content type
@@ -388,17 +447,7 @@ class LegalJudgmentExtractor:
             escaped_line = stripped.replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
             
             # Apply appropriate CSS class
-            css_class = line_type
-            
-            # Special handling for numbering continuation
-            if line_type == 'paragraph' and last_was_numbering:
-                # Check if this looks like continuation of numbering
-                if not re.match(r'^[A-Z]', stripped):  # Doesn't start with capital
-                    escaped_line = f"        {escaped_line}"  # Add extra indentation
-            
-            html_content.append(f'<div class="{css_class}">{escaped_line}</div>')
-            
-            last_was_numbering = (line_type == 'numbering')
+            html_content.append(f'<div class="{line_type}">{escaped_line}</div>')
         
         html_content.append('''    </div>
 </body>
@@ -466,7 +515,7 @@ class LegalJudgmentExtractor:
         return formatted_text, html_output
 
 def main():
-    st.title("⚖️ Legal Judgment Text Extractor")
+    st.title("⚖️ Legal Judgment Text Extractor (Improved)")
     st.markdown("---")
     st.markdown("**Professional extraction and formatting of legal judgments from PDF files**")
     
@@ -480,13 +529,14 @@ def main():
             help="Choose the PDF text extraction method"
         )
         
-        st.markdown("### Features")
+        st.markdown("### Improvements")
         st.markdown("""
-        ✅ **Smart paragraph reconstruction**
-        ✅ **Proper content classification** 
-        ✅ **Intelligent spacing normalization**
-        ✅ **Professional HTML formatting**
-        ✅ **Print-ready output**
+        ✅ **Better paragraph reconstruction**
+        ✅ **Improved content classification** 
+        ✅ **Smarter spacing normalization**
+        ✅ **Enhanced HTML formatting**
+        ✅ **Reduced fragmentation**
+        ✅ **Better numbered list handling**
         """)
     
     # File upload
@@ -510,12 +560,12 @@ def main():
                 st.rerun()
         
         if extract_button:
-            with st.spinner("Processing PDF and formatting content..."):
+            with st.spinner("Processing PDF with improved algorithms..."):
                 try:
                     formatted_text, html_output = extractor.process_pdf(uploaded_file, extraction_method)
                     
                     if formatted_text:
-                        st.success("✅ Document processed successfully!")
+                        st.success("✅ Document processed successfully with improved formatting!")
                         
                         # Create tabs
                         tab1, tab2, tab3, tab4 = st.tabs([
@@ -526,17 +576,17 @@ def main():
                         ])
                         
                         with tab1:
-                            st.subheader("Formatted Text Output")
+                            st.subheader("Improved Formatted Text Output")
                             st.text_area(
-                                "Clean, formatted text with proper paragraph structure:",
+                                "Clean, formatted text with better paragraph structure:",
                                 value=formatted_text,
                                 height=500,
-                                help="This shows the processed text with intelligent formatting"
+                                help="This shows the processed text with improved formatting algorithms"
                             )
                         
                         with tab2:
-                            st.subheader("HTML Document Preview")
-                            st.markdown("*This preview shows how the document will appear when printed or saved as HTML:*")
+                            st.subheader("Enhanced HTML Document Preview")
+                            st.markdown("*Enhanced formatting with better content recognition:*")
                             st.components.v1.html(html_output, height=700, scrolling=True)
                         
                         with tab3:
@@ -578,25 +628,19 @@ def main():
                                 st.download_button(
                                     label="📄 Download HTML File",
                                     data=html_output.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_formatted.html",
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_improved.html",
                                     mime="text/html",
-                                    help="Download as formatted HTML document"
+                                    help="Download as improved HTML document"
                                 )
                             
                             with col2:
                                 st.download_button(
                                     label="📝 Download Text File",
                                     data=formatted_text.encode('utf-8'),
-                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_formatted.txt",
+                                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_improved.txt",
                                     mime="text/plain",
-                                    help="Download as plain text file"
+                                    help="Download as improved text file"
                                 )
-                            
-                            st.markdown("#### Export Options")
-                            st.markdown("""
-                            - **HTML**: Best for viewing, printing, and sharing
-                            - **Text**: Best for editing and further processing
-                            """)
                     
                     else:
                         st.error("❌ Failed to extract text from PDF. Please try a different extraction method.")
@@ -606,37 +650,29 @@ def main():
                     st.info("Try using a different extraction method or ensure the PDF contains readable text.")
     
     else:
-        # Show example when no file uploaded
-        st.markdown("### 📋 What This Tool Does")
+        # Show improvements when no file uploaded
+        st.markdown("### 🔧 Key Improvements Made")
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("""
-            **Before: Raw PDF Extract**
-            ```
-            OMP (I) Comm. No. 800/20
-            HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
-            13.02.2020
-            Present : Sh. Ashok Kumar Ld. Counsel for petitioner.
-                            This is a petition u/s 9 of Indian Arbitration and Conciliation Act
-            1996 for issuing interim measure by way of appointment of receiver is received
-            by way of assignment. It be checked and registered.
-            ```
+            **❌ Previous Issues:**
+            - Lines incorrectly classified as signatures
+            - Excessive fragmentation of paragraphs  
+            - Too many empty spaces inserted
+            - Poor numbered list handling
+            - Sentences split inappropriately
             """)
         
         with col2:
             st.markdown("""
-            **After: Smart Formatting**
-            ```
-            OMP (I) Comm. No. 800/20
-            HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
-            13.02.2020
-            
-            Present: Sh. Ashok Kumar Ld. Counsel for petitioner.
-            
-            This is a petition u/s 9 of Indian Arbitration and Conciliation Act 1996 for issuing interim measure by way of appointment of receiver is received by way of assignment. It be checked and registered.
-            ```
+            **✅ Improvements:**
+            - More accurate line type detection
+            - Better paragraph reconstruction logic
+            - Smarter spacing normalization
+            - Enhanced numbered list recognition
+            - Proper sentence continuity
             """)
 
 if __name__ == "__main__":
