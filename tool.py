@@ -2,16 +2,27 @@ import streamlit as st
 import pypdf2htmlEX
 import tempfile
 import os
+import zipfile
+from io import BytesIO
 
 st.title("Legal Judgment PDF to HTML Converter (High-Fidelity Layout Preservation)")
 
 st.markdown("""
-This tool uses pdf2htmlEX via a Python wrapper to convert uploaded legal judgment PDFs to HTML, preserving the original layout, structure, text alignment, fonts, and formatting as closely as possible—aiming for a near-carbon copy of the PDF.
-**Important Prerequisite:** You must have pdf2htmlEX installed on your system. On Ubuntu, use `sudo apt-get install pdf2htmlex`. For other OS, see https://github.com/pdf2htmlEX/pdf2htmlEX/wiki/Building-and-Installing.
-Install the Python wrapper with `pip install pypdf2htmlex`.
+This tool uses **pdf2htmlEX** via a Python wrapper to convert uploaded legal judgment PDFs to HTML, preserving the original layout, structure, text alignment, fonts, and formatting as closely as possible—aiming for a near-carbon copy of the PDF.
+
+**Important Prerequisite:** You must have `pdf2htmlEX` installed on your system.
+- On Ubuntu: `sudo apt-get install pdf2htmlex`
+- Other OS: see [installation guide](https://github.com/pdf2htmlEX/pdf2htmlEX/wiki/Building-and-Installing)
+
+Install the Python wrapper with:
+```bash
+pip install pypdf2htmlex
+```
 """)
 
+# ===================
 # Single file uploader
+# ===================
 uploaded_file = st.file_uploader("Upload a single judgment PDF file", type=["pdf"])
 
 if uploaded_file is not None:
@@ -21,7 +32,7 @@ if uploaded_file is not None:
             tmp_path = tmp.name
 
         pdf = pypdf2htmlEX.PDF(tmp_path)
-        pdf.to_html(drm=False)  # Convert to HTML; drm=False by default
+        pdf.to_html(drm=False)  # Convert to HTML
 
         # Output HTML path
         html_path = os.path.splitext(tmp_path)[0] + '.html'
@@ -48,7 +59,9 @@ if uploaded_file is not None:
         st.error(f"An error occurred while processing the PDF: {str(e)}")
         st.info("Ensure pdf2htmlEX is installed and accessible in your system's PATH.")
 
-# Multiple file uploader for batch processing
+# ========================
+# Multiple file uploader
+# ========================
 uploaded_files = st.file_uploader("Upload multiple judgment PDF files for batch processing", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -90,7 +103,8 @@ if uploaded_files:
 st.markdown("""
 **Notes:**
 - This tool provides high-fidelity conversion, making the HTML output resemble the input PDF completely in structure, alignment, and appearance.
-- For processing hundreds of millions of cases with varying district court formats, Streamlit is suitable for interactive use but not ideal for massive scale. Use the following command-line Python script for batch processing large directories:
+- For processing **hundreds of millions of cases** with varying district court formats, Streamlit is suitable for interactive use but not ideal for massive scale. Use the following command-line Python script for batch processing large directories:
+
 ```python
 import pypdf2htmlEX
 import os
@@ -112,3 +126,5 @@ def batch_convert_pdf_to_html(input_dir, output_dir=None, prefix=''):
 
 # Usage example:
 # batch_convert_pdf_to_html('path/to/input/folder', 'path/to/output/folder', 'Converted_')
+```
+""")
