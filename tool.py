@@ -14,7 +14,7 @@ try:
 except Exception:
     OCR_AVAILABLE = False
 
-st.set_page_config(page_title="Legal Judgment PDF → HTML (High-fidelity)", layout="wide")
+st.set_page_config(page_title="Legal Judgment PDF → HTML ", layout="wide")
 
 # ---------- Helpers ----------
 def to_data_url(pix):
@@ -25,9 +25,6 @@ def to_data_url(pix):
 
 def extract_layout_pages(pdf_bytes, render_dpi=150):
     """
-    Extract page images and exact text spans (with positions and font info).
-    Returns list of pages: {width_px, height_px, img, spans: [{x,y,w,h,text,font,size}]}
-    Coordinates are in pixels with origin at top-left matching the rendered image.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     scale = render_dpi / 72.0
@@ -67,9 +64,6 @@ def extract_layout_pages(pdf_bytes, render_dpi=150):
 
 def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
     """
-    Generate HTML with page images as background and absolutely positioned spans on top.
-    include_image: whether to include the original rendered image as background.
-    fonts_dict: optional dict map fontname->base64-ttf to embed via @font-face.
     """
     pages_html = []
 
@@ -155,18 +149,10 @@ def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
     return html_full
 
 # ---------- Streamlit UI ----------
-st.title("High-fidelity Legal Judgment PDF → HTML (Carbon-copy approach)")
+st.title("")
 st.markdown(
     """
-This version aims to produce a **near-carbon copy** of the input PDF by:
 
-- Rendering each PDF page as a high-resolution image.
-- Overlaying the *exact* text spans (positions, approximate font-sizes) over that image so the result looks identical while keeping selectable/searchable text.
-
-**Tips:**
-- Increase the DPI slider for higher-fidelity images (at cost of memory / time).
-- If you have original fonts (.ttf), upload them to embed for better match.
-- For scanned PDFs, enable OCR to extract word-level boxes.
 """
 )
 
@@ -234,6 +220,7 @@ if uploaded is not None:
                        file_name=os.path.splitext(uploaded.name)[0] + "_export.html", mime='text/html')
 
     st.markdown("---")
-    st.markdown("**If you want a closer match:**\n\n- Upload original TTF fonts used by the court (if available).\n- Increase Render DPI to 200-300.\n- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
+    st.markdown("")
 else:
-    st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
+    st.info("Upload a PDF to begin. ")
+
