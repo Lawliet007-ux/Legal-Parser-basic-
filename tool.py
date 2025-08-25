@@ -1,5 +1,5 @@
 import streamlit as st
-import pypdf2htmlEX
+import pypdf2htmlex
 import tempfile
 import os
 import zipfile
@@ -128,3 +128,4 @@ def batch_convert_pdf_to_html(input_dir, output_dir=None, prefix=''):
 # batch_convert_pdf_to_html('path/to/input/folder', 'path/to/output/folder', 'Converted_')
 ```
 """)
+
