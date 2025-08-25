@@ -1,507 +1,521 @@
 import streamlit as st
-from typing import Dict, Optional, List, Tuple
+import PyPDF2
+import pdfplumber
+import fitz  # PyMuPDF
 import re
-import json
-import logging
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
+import base64
+from datetime import datetime
+import pandas as pd
 
-# Optional/conditional imports
-try:
-    import pdfplumber
-except Exception:
-    pdfplumber = None
-
-try:
-    import PyPDF2
-except Exception:
-    PyPDF2 = None
-
-try:
-    from pdfminer.high_level import extract_text as pdfminer_extract_text
-except Exception:
-    pdfminer_extract_text = None
-
-try:
-    from PIL import Image
-    import pytesseract
-except Exception:
-    Image = None
-    pytesseract = None
-
-# ----------------------
-# Configuration & Logger
-# ----------------------
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("judgment_extractor")
-
-class Config:
-    # Tunable options for production
-    DEFAULT_WORKERS = int(os.getenv("JE_WORKERS", "4"))
-    OCR_ENABLED = os.getenv("JE_OCR_ENABLED", "false").lower() in ("1","true","yes")
-    OCR_LANG = os.getenv("JE_OCR_LANG", "eng")
-    DETECTION_CONFIDENCE = float(os.getenv("JE_DETECTION_CONF", "0.6"))
-
-# ----------------------
-# Utilities
-# ----------------------
-
-def safe_read_bytes(file) -> bytes:
-    """Return raw bytes from a Streamlit or file-like object without closing it."""
-    try:
-        file.seek(0)
-    except Exception:
-        pass
-    data = file.read()
-    try:
-        file.seek(0)
-    except Exception:
-        pass
-    return data
-
-# ----------------------
-# Extraction backends
-# ----------------------
-
-class BaseExtractor:
-    def extract(self, file) -> str:
-        raise NotImplementedError
-
-class PdfPlumberExtractor(BaseExtractor):
-    """Layout-aware extraction using pdfplumber. Reconstructs paragraphs using positions."""
+class LegalJudgmentExtractor:
     def __init__(self):
-        if not pdfplumber:
-            raise RuntimeError("pdfplumber not available")
-
-    def extract(self, file) -> str:
-        text_pages = []
+        self.extracted_text = ""
+        self.html_output = ""
+        self.formatting_patterns = {
+            'case_number': r'(?:OMP\s*\([I]+\)\s*Comm\.\s*No\.|Case\s+No\.?|Criminal\s+Case\s+No\.?|Civil\s+Case\s+No\.?)[\s:]*([A-Z0-9\/\-\s\.]+)',
+            'court_name': r'IN\s+THE\s+(?:HIGH\s+)?COURT\s+OF\s+[A-Z\s,&]+|(?:DISTRICT\s+)?(?:SESSIONS?\s+)?COURT\s+[A-Z\s,&]+',
+            'date': r'\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s*,?\s*\d{4}',
+            'numbering': r'^\s*(\([a-zA-Z0-9]+\)|\d+\.?\s*\(\w+\)|\d+\.\d+\.?\s*|\d+\.\s*)',
+            'roman_numbering': r'^\s*\([ivxlcdm]+\)\s*',
+            'paragraph_start': r'^\s*\d+\.\s*',
+            'sub_numbering': r'^\s*\([a-zA-Z0-9]+\)\s*|\d+\.\d+\.\s*',
+            'page_number': r'Page\s+\d+\s+of\s+\d+|\-\s*\d+\s*\-|:\d+:',
+            'signature_line': r'^\s*\([A-Z\s\.]+\)\s*$',
+            'judge_signature': r'^[A-Z\s\.]+\n(?:District\s+Judge|Additional\s+District\s+Judge|Chief\s+Judicial\s+Magistrate)',
+            'present_line': r'^Present\s*:\s*',
+            'colon_numbering': r':\d+:',
+        }
+    
+    def extract_with_pypdf2(self, pdf_file):
+        """Extract text using PyPDF2 - basic extraction"""
         try:
-            with pdfplumber.open(file) as pdf:
-                for pnum, page in enumerate(pdf.pages, start=1):
-                    # try to get table-free flow first
-                    words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=False)
-                    if not words:
-                        page_text = page.extract_text() or ""
-                    else:
-                        # reconstruct by line clusters
-                        page_text = self._reconstruct_from_words(words)
-                    text_pages.append(f"--- PAGE {pnum} ---\n" + page_text)
-            return "\n".join(text_pages)
-        except Exception as e:
-            logger.exception("pdfplumber extraction failed")
-            return ""
-
-    def _reconstruct_from_words(self, words: List[Dict]) -> str:
-        # group words by top (y0) coordinate into approximate lines
-        lines: Dict[int, List[Dict]] = {}
-        for w in words:
-            top = int(round(float(w.get("top", 0))))
-            # bucket by top with neighbor tolerance
-            bucket = top // 3
-            lines.setdefault(bucket, []).append(w)
-
-        ordered = []
-        for bucket in sorted(lines.keys()):
-            row = sorted(lines[bucket], key=lambda x: x.get("x0", 0))
-            line_text = " ".join([w.get("text", "") for w in row])
-            ordered.append(line_text)
-
-        # simple post-processing to join lines into paragraphs with heuristics
-        paragraphs = []
-        cur = []
-        for ln in ordered:
-            ln = ln.strip()
-            if not ln:
-                if cur:
-                    paragraphs.append(" ".join(cur))
-                    cur = []
-                continue
-            # if line ends with hyphen -> join without space
-            if ln.endswith("-"):
-                cur.append(ln[:-1])
-            else:
-                cur.append(ln)
-                # heuristic: blank line / sentence end triggers paragraph break
-                if ln.endswith(('.', '?', '!', '"', "'")) and len(cur) >= 1:
-                    paragraphs.append(" ".join(cur))
-                    cur = []
-        if cur:
-            paragraphs.append(" ".join(cur))
-        return "\n\n".join(paragraphs)
-
-class PyPDF2Extractor(BaseExtractor):
-    def __init__(self):
-        if not PyPDF2:
-            raise RuntimeError("PyPDF2 not available")
-
-    def extract(self, file) -> str:
-        try:
-            # PyPDF2 expects a file-like object; we pass through
-            reader = PyPDF2.PdfReader(file)
-            pages = []
-            for p in reader.pages:
-                txt = p.extract_text() or ""
-                pages.append(txt)
-            return "\n".join([f"--- PAGE {i+1} ---\n{p}" for i, p in enumerate(pages)])
-        except Exception:
-            logger.exception("PyPDF2 extraction failed")
-            return ""
-
-class PdfMinerExtractor(BaseExtractor):
-    def __init__(self):
-        if not pdfminer_extract_text:
-            raise RuntimeError("pdfminer.six not available")
-
-    def extract(self, file) -> str:
-        try:
-            # pdfminer operates on path or file object
-            text = pdfminer_extract_text(file)
-            # split heuristically into pages if available marker
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page_num, page in enumerate(pdf_reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
             return text
-        except Exception:
-            logger.exception("pdfminer extraction failed")
-            return ""
-
-class OCRExtractor(BaseExtractor):
-    """Fallback OCR extractor using pytesseract + Pillow. Heavy — enable only as needed."""
-    def __init__(self, lang: str = Config.OCR_LANG):
-        if not (pytesseract and Image):
-            raise RuntimeError("PIL/pytesseract not available for OCR")
-        self.lang = lang
-
-    def extract(self, file) -> str:
-        # file can be bytes or path — we try to open via PIL
-        try:
-            raw = safe_read_bytes(file)
-            from pdf2image import convert_from_bytes
-            pages = convert_from_bytes(raw)
-            out = []
-            for i, pg in enumerate(pages, start=1):
-                txt = pytesseract.image_to_string(pg, lang=self.lang)
-                out.append(f"--- PAGE {i} ---\n" + txt)
-            return "\n".join(out)
-        except Exception:
-            logger.exception("OCR extraction failed")
-            return ""
-
-# ----------------------
-# Parsing & detection
-# ----------------------
-
-class JudgmentParser:
-    """Rule-based parser with improved heuristics for courts across formats."""
-
-    CASE_PATTERNS = [
-        # combination of common prefixes used in district courts
-        r"\b(?:OMP|OMP\s*\(I\)|CRL|CS|CC|SA|FAO|CRP|MAC|RFA|SLP|CIVIL|CR|RFA)\b.*?\b(?:No\.?|/|:)\s*\d+[/\\\w-]*",
-        r"\bNo\.\s*[:]?"]
-
-    DATE_PATTERN = r"\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b"
-
-    PARTY_SEPARATORS = [" VS ", " V/S ", " v ", " v. ", " vs ", " v/s "]
-
-    def __init__(self):
-        pass
-
-    def parse(self, text: str) -> Dict:
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        data = {"case_number": "", "parties": "", "date": "", "judge": "", "court": "", "paragraphs": []}
-
-        # find case number
-        for ln in lines[:40]:
-            for pat in self.CASE_PATTERNS:
-                m = re.search(pat, ln, re.IGNORECASE)
-                if m:
-                    data["case_number"] = m.group(0).strip()
-                    break
-            if data["case_number"]:
-                break
-
-        # find date - scan lines for date pattern
-        for ln in reversed(lines[:120]):
-            m = re.search(self.DATE_PATTERN, ln)
-            if m:
-                data["date"] = m.group(0)
-                break
-
-        # find parties - look in top lines
-        for ln in lines[:8]:
-            for sep in self.PARTY_SEPARATORS:
-                if sep in ln:
-                    data["parties"] = ln
-                    break
-            if data["parties"]:
-                break
-
-        # find judge - look for keywords JUDGE, DISTRICT JUDGE, HON'BLE, etc.
-        for ln in lines[-30:]:
-            if re.search(r"\b(JUDGE|DISTRICT JUDGE|CHIEF JUDGE|HON'BLE|PRESIDING)\b", ln, re.IGNORECASE):
-                data["judge"] = ln
-                break
-
-        # court detection
-        for ln in lines[:40]:
-            if re.search(r"\b(COURT|TRIBUNAL|COMMERCIAL COURT|DISTT|DISTRICT)\b", ln, re.IGNORECASE):
-                data["court"] = ln
-                break
-
-        # paragraphs: naive split on blank-lines and page markers
-        paras = []
-        cur = []
-        for ln in text.splitlines():
-            if ln.strip().startswith('--- PAGE'):
-                if cur:
-                    paras.append(' '.join(cur).strip())
-                    cur = []
-                paras.append(ln.strip())
-                continue
-            if not ln.strip():
-                if cur:
-                    paras.append(' '.join(cur).strip())
-                    cur = []
-            else:
-                cur.append(ln.strip())
-        if cur:
-            paras.append(' '.join(cur).strip())
-        data['paragraphs'] = paras
-
-        return data
-
-# ----------------------
-# Numbering preservation
-# ----------------------
-
-class NumberingPreserver:
-    """Improves detection of numbered lists and sublists using regex groups and positional heuristics."""
-
-    RE_PATTERNS = [
-        (re.compile(r'^\s*(?P<num>\d+)\.\s+(?P<body>.+)$'), 'numbered-dots'),
-        (re.compile(r'^\s*\((?P<num>\d+)\)\s+(?P<body>.+)$'), 'numbered-parentheses'),
-        (re.compile(r'^\s*\((?P<num>[ivxIVX]+)\)\s+(?P<body>.+)$'), 'sub-points'),
-        (re.compile(r'^\s*(?P<num>[IVX]+)[\.)]\s+(?P<body>.+)$'), 'roman-number'),
-        (re.compile(r'^\s*\((?P<num>[a-zA-Z])\)\s+(?P<body>.+)$'), 'lettered-points'),
-    ]
-
-    def preserve(self, paragraphs: List[str]) -> str:
-        out_lines = []
-        for p in paragraphs:
-            if p.startswith('--- PAGE'):
-                out_lines.append(f'<div class="page-marker">{p}</div>')
-                continue
-            # split paragraph into possible lines
-            lines = p.split('  ')
-            matched = False
-            for ln in lines:
-                ln = ln.strip()
-                for pat, cls in self.RE_PATTERNS:
-                    m = pat.match(ln)
-                    if m:
-                        out_lines.append(f'<div class="{cls}">{ln}</div>')
-                        matched = True
-                        break
-                if not matched:
-                    # fallback: detect leading numbering anywhere
-                    if re.match(r'^\s*\d+\s+[A-Za-z]', ln):
-                        out_lines.append(f'<div class="numbered-dots">{ln}</div>')
-                    else:
-                        out_lines.append(f'<div class="paragraph">{ln}</div>')
-                matched = False
-        return "\n".join(out_lines)
-
-# ----------------------
-# HTML generation
-# ----------------------
-
-HTML_BASE_CSS = """
-body { font-family: 'Times New Roman', serif; font-size: 12pt; color: #111; background: #f6f6f6; }
-.document { max-width: 210mm; margin: 12mm auto; background: white; padding: 18mm; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-.header { text-align: center; border-bottom: 1px solid #ddd; padding-bottom: 8px; margin-bottom: 12px; }
-.page-marker{ text-align:center; color:#666; margin: 8px 0; }
-.paragraph{ text-align: justify; margin:8px 0; }
-.numbered-dots { margin:8px 0; padding-left:16px; text-indent:-8px; font-weight:600; }
-.numbered-parentheses { margin:8px 0; padding-left:18px; text-indent:-8px; font-weight:600; }
-.roman-number { margin:12px 0; padding-left:24px; text-indent:-12px; font-weight:700; }
-.lettered-points{ margin:6px 0; padding-left:28px; }
-.sub-points{ margin:6px 0; padding-left:36px; font-style:italic; }
-.judge-signature{ text-align:right; font-weight:700; margin-top:18px; }
-.court-details{ text-align:right; font-style:italic; }
-@media print { body{ background: white;} .document{ box-shadow:none; } }
-"""
-
-class HTMLGenerator:
-    def __init__(self, css: str = HTML_BASE_CSS):
-        self.css = css
-
-    def generate(self, preserved_html: str, metadata: Dict) -> str:
-        case_no = metadata.get('case_number', 'Case Number Not Found')
-        parties = metadata.get('parties', 'Parties Not Found')
-        date = metadata.get('date', '')
-        judge = metadata.get('judge', '')
-        court = metadata.get('court', '')
-
-        template = f"""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{case_no}</title>
-<style>{self.css}</style>
-</head>
-<body>
-  <div class="document">
-    <div class="header">
-      <div class="case-number">{case_no}</div>
-      <div class="parties">{parties}</div>
-      <div class="date">{date}</div>
-    </div>
-    <div class="content">
-      {preserved_html}
-    </div>
-    <div class="judge-signature">{judge}</div>
-    <div class="court-details">{court}</div>
-  </div>
-</body>
-</html>
-"""
-        return template
-
-# ----------------------
-# Coordinator: Extraction pipeline
-# ----------------------
-
-class JudgmentPipeline:
-    def __init__(self, ocr_enabled: bool = Config.OCR_ENABLED):
-        # priority order of backends
-        self.backends = []
-        if pdfplumber:
-            self.backends.append(PdfPlumberExtractor())
-        if PyPDF2:
-            self.backends.append(PyPDF2Extractor())
-        if pdfminer_extract_text:
-            self.backends.append(PdfMinerExtractor())
-        if ocr_enabled and pytesseract:
-            self.backends.append(OCRExtractor())
-
-        if not self.backends:
-            raise RuntimeError("No extraction backend available. Install pdfplumber or PyPDF2 or pdfminer or enable OCR.")
-
-        self.parser = JudgmentParser()
-        self.preserver = NumberingPreserver()
-        self.htmlgen = HTMLGenerator()
-
-    def process(self, file) -> Tuple[bool, Dict]:
-        """Try backends in order; return tuple(success, result_dict) where result_dict contains keys: raw_text, metadata, html"""
-        last_error = None
-        raw_text = ""
-        for backend in self.backends:
-            try:
-                raw_text = backend.extract(file)
-                if raw_text and len(raw_text.strip()) > 10:
-                    logger.info(f"Extraction succeeded with {backend.__class__.__name__}")
-                    break
-            except Exception as e:
-                logger.exception("Backend failed")
-                last_error = str(e)
-                continue
-        if not raw_text:
-            return False, {"error": "All extraction backends failed", "detail": last_error}
-
-        # parse
-        metadata = self.parser.parse(raw_text)
-        # preserve numbering and generate HTML body
-        preserved = self.preserver.preserve(metadata.get('paragraphs', []))
-        html = self.htmlgen.generate(preserved, metadata)
-
-        return True, {"raw_text": raw_text, "metadata": metadata, "html": html}
-
-# ----------------------
-# Batch processing helper (local). For hundreds of millions of docs, use a distributed framework like Dask/Celery/Kubernetes.
-# ----------------------
-
-def process_batch(file_paths: List[str], out_dir: str, workers: int = Config.DEFAULT_WORKERS):
-    os.makedirs(out_dir, exist_ok=True)
-    results = []
-    pipeline = JudgmentPipeline()
-
-    def _process_path(path):
-        logger.info(f"Processing {path}")
-        try:
-            with open(path, 'rb') as fh:
-                ok, res = pipeline.process(fh)
-            if ok:
-                base = os.path.basename(path)
-                name, _ = os.path.splitext(base)
-                # write outputs
-                with open(os.path.join(out_dir, f"{name}.txt"), 'w', encoding='utf-8') as w:
-                    w.write(res['raw_text'])
-                with open(os.path.join(out_dir, f"{name}.html"), 'w', encoding='utf-8') as w:
-                    w.write(res['html'])
-                with open(os.path.join(out_dir, f"{name}.json"), 'w', encoding='utf-8') as w:
-                    json.dump(res['metadata'], w, indent=2)
-                return (path, True, None)
-            else:
-                return (path, False, res)
         except Exception as e:
-            logger.exception("Processing error")
-            return (path, False, str(e))
+            st.error(f"PyPDF2 extraction failed: {str(e)}")
+            return ""
+    
+    def extract_with_pdfplumber(self, pdf_file):
+        """Extract text using pdfplumber - better for complex layouts"""
+        try:
+            text = ""
+            with pdfplumber.open(pdf_file) as pdf:
+                for page_num, page in enumerate(pdf.pages):
+                    page_text = page.extract_text(layout=True, x_tolerance=3, y_tolerance=3)
+                    if page_text:
+                        text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+            return text
+        except Exception as e:
+            st.error(f"pdfplumber extraction failed: {str(e)}")
+            return ""
+    
+    def extract_with_pymupdf(self, pdf_file):
+        """Extract text using PyMuPDF - good for preserving formatting"""
+        try:
+            text = ""
+            pdf_document = fitz.open(stream=pdf_file.read(), filetype="pdf")
+            for page_num in range(pdf_document.page_count):
+                page = pdf_document[page_num]
+                page_text = page.get_text()
+                if page_text:
+                    text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+            pdf_document.close()
+            return text
+        except Exception as e:
+            st.error(f"PyMuPDF extraction failed: {str(e)}")
+            return ""
+    
+    def clean_and_preserve_formatting(self, text):
+        """Clean text while preserving legal document formatting"""
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Skip page markers we added
+            if line.strip().startswith('--- Page') and line.strip().endswith('---'):
+                continue
+                
+            # Preserve important formatting
+            line = line.rstrip()
+            
+            # Skip completely empty lines but preserve single spaces
+            if line.strip() == '':
+                if cleaned_lines and cleaned_lines[-1].strip() != '':
+                    cleaned_lines.append('')
+                continue
+            
+            # Clean up excessive spaces while preserving intentional indentation
+            if line.strip():
+                # Count leading spaces for indentation
+                leading_spaces = len(line) - len(line.lstrip())
+                content = ' '.join(line.split())
+                
+                # Restore some indentation for sub-points
+                if leading_spaces > 0 and (
+                    re.match(self.formatting_patterns['numbering'], line) or
+                    re.match(self.formatting_patterns['sub_numbering'], line) or
+                    re.match(self.formatting_patterns['roman_numbering'], line)
+                ):
+                    content = '    ' + content
+                
+                cleaned_lines.append(content)
+        
+        return '\n'.join(cleaned_lines)
+    
+    def identify_document_structure(self, text):
+        """Identify key structural elements of the legal document"""
+        structure = {
+            'case_number': None,
+            'parties': None,
+            'court_name': None,
+            'date': None,
+            'judge': None,
+            'numbering_style': 'mixed'
+        }
+        
+        lines = text.split('\n')
+        
+        for i, line in enumerate(lines):
+            # Extract case number
+            case_match = re.search(self.formatting_patterns['case_number'], line, re.IGNORECASE)
+            if case_match and not structure['case_number']:
+                structure['case_number'] = case_match.group(0).strip()
+            
+            # Extract court name
+            court_match = re.search(self.formatting_patterns['court_name'], line, re.IGNORECASE)
+            if court_match and not structure['court_name']:
+                structure['court_name'] = court_match.group(0).strip()
+            
+            # Extract date
+            date_match = re.search(self.formatting_patterns['date'], line)
+            if date_match and not structure['date']:
+                structure['date'] = date_match.group(0).strip()
+            
+            # Identify judge signature (usually at the end)
+            if i > len(lines) - 10:  # Check last 10 lines
+                if (re.search(r'District\s+Judge|Additional\s+District\s+Judge|Chief\s+Judicial\s+Magistrate', line, re.IGNORECASE) and
+                    not structure['judge']):
+                    # Look for name in previous lines
+                    for j in range(max(0, i-3), i+1):
+                        if lines[j].strip() and not re.search(r'District|Judge|Magistrate|Court', lines[j]):
+                            if lines[j].strip().isupper() or lines[j].count(' ') <= 3:
+                                structure['judge'] = lines[j].strip()
+                                break
+        
+        return structure
+    
+    def convert_to_html(self, text, structure):
+        """Convert extracted text to HTML with proper formatting"""
+        lines = text.split('\n')
+        html_lines = []
+        
+        html_lines.append('<!DOCTYPE html>')
+        html_lines.append('<html lang="en">')
+        html_lines.append('<head>')
+        html_lines.append('<meta charset="UTF-8">')
+        html_lines.append('<meta name="viewport" content="width=device-width, initial-scale=1.0">')
+        html_lines.append('<title>Legal Judgment</title>')
+        html_lines.append('<style>')
+        html_lines.append("""
+            body {
+                font-family: 'Times New Roman', serif;
+                line-height: 1.6;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #ffffff;
+                color: #000000;
+            }
+            .case-header {
+                text-align: center;
+                margin-bottom: 20px;
+                border-bottom: 2px solid #000;
+                padding-bottom: 10px;
+            }
+            .case-number {
+                font-weight: bold;
+                font-size: 14px;
+                margin-bottom: 5px;
+            }
+            .parties {
+                font-weight: bold;
+                font-size: 16px;
+                margin: 10px 0;
+            }
+            .date {
+                font-weight: bold;
+                margin: 10px 0;
+            }
+            .present-line {
+                margin: 15px 0;
+                font-style: italic;
+            }
+            .numbered-point {
+                margin: 10px 0;
+                margin-left: 20px;
+            }
+            .sub-numbered-point {
+                margin: 8px 0;
+                margin-left: 40px;
+            }
+            .paragraph {
+                margin: 15px 0;
+                text-align: justify;
+            }
+            .signature-block {
+                margin-top: 40px;
+                text-align: right;
+            }
+            .judge-name {
+                font-weight: bold;
+                margin-top: 20px;
+            }
+            .court-designation {
+                font-size: 12px;
+                margin-top: 5px;
+            }
+            .page-break {
+                border-top: 1px dashed #ccc;
+                margin: 20px 0;
+                text-align: center;
+                color: #666;
+                font-size: 12px;
+            }
+            .colon-numbering {
+                text-align: center;
+                font-weight: bold;
+                margin: 10px 0;
+            }
+        """)
+        html_lines.append('</style>')
+        html_lines.append('</head>')
+        html_lines.append('<body>')
+        
+        # Process each line
+        in_header = True
+        header_lines = []
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                html_lines.append('<br>')
+                continue
+            
+            # Detect header section
+            if in_header and (
+                structure['case_number'] and structure['case_number'] in line or
+                re.search(self.formatting_patterns['case_number'], line) or
+                'VS' in line.upper() or 'V/S' in line.upper() or
+                re.search(self.formatting_patterns['date'], line) or
+                line.startswith('Present')
+            ):
+                header_lines.append(line)
+                if line.startswith('Present'):
+                    in_header = False
+                continue
+            elif in_header:
+                header_lines.append(line)
+                continue
+            
+            # Process header at the end of header detection
+            if header_lines and not in_header:
+                html_lines.append('<div class="case-header">')
+                for header_line in header_lines:
+                    if re.search(self.formatting_patterns['case_number'], header_line):
+                        html_lines.append(f'<div class="case-number">{header_line}</div>')
+                    elif 'VS' in header_line.upper() or 'V/S' in header_line.upper():
+                        html_lines.append(f'<div class="parties">{header_line}</div>')
+                    elif re.search(self.formatting_patterns['date'], header_line):
+                        html_lines.append(f'<div class="date">{header_line}</div>')
+                    elif header_line.startswith('Present'):
+                        html_lines.append(f'<div class="present-line">{header_line}</div>')
+                    else:
+                        html_lines.append(f'<div>{header_line}</div>')
+                html_lines.append('</div>')
+                header_lines = []
+            
+            # Handle colon numbering (like :2:, :3:)
+            if re.match(self.formatting_patterns['colon_numbering'], line):
+                html_lines.append(f'<div class="colon-numbering">{line}</div>')
+                continue
+            
+            # Handle numbered points
+            if re.match(self.formatting_patterns['numbering'], line):
+                if line.strip().startswith('(') and line.count('(') == 1:
+                    html_lines.append(f'<div class="sub-numbered-point">{line}</div>')
+                else:
+                    html_lines.append(f'<div class="numbered-point">{line}</div>')
+                continue
+            
+            # Handle sub-numbered points
+            if re.match(self.formatting_patterns['sub_numbering'], line):
+                html_lines.append(f'<div class="sub-numbered-point">{line}</div>')
+                continue
+            
+            # Handle judge signature (detect at end of document)
+            if i > len(lines) - 10:
+                if (re.search(r'District\s+Judge|Additional\s+District\s+Judge|Chief\s+Judicial\s+Magistrate', line, re.IGNORECASE) or
+                    (line.isupper() and len(line.split()) <= 4 and i > len(lines) - 5)):
+                    if not any('signature-block' in hl for hl in html_lines[-5:]):
+                        html_lines.append('<div class="signature-block">')
+                    if re.search(r'District\s+Judge|Additional\s+District\s+Judge|Chief\s+Judicial\s+Magistrate', line, re.IGNORECASE):
+                        html_lines.append(f'<div class="court-designation">{line}</div>')
+                    else:
+                        html_lines.append(f'<div class="judge-name">{line}</div>')
+                    continue
+            
+            # Regular paragraphs
+            html_lines.append(f'<div class="paragraph">{line}</div>')
+        
+        # Close signature block if opened
+        if html_lines and 'signature-block' in html_lines[-1]:
+            html_lines.append('</div>')
+        
+        html_lines.append('</body>')
+        html_lines.append('</html>')
+        
+        return '\n'.join(html_lines)
+    
+    def extract_judgment(self, pdf_file, extraction_method):
+        """Main extraction function"""
+        # Reset file pointer
+        pdf_file.seek(0)
+        
+        # Choose extraction method
+        if extraction_method == "PyPDF2":
+            raw_text = self.extract_with_pypdf2(pdf_file)
+        elif extraction_method == "pdfplumber":
+            raw_text = self.extract_with_pdfplumber(pdf_file)
+        elif extraction_method == "PyMuPDF":
+            raw_text = self.extract_with_pymupdf(pdf_file)
+        else:  # Auto-detect
+            # Try multiple methods and choose the best result
+            pdf_file.seek(0)
+            text1 = self.extract_with_pdfplumber(pdf_file)
+            pdf_file.seek(0)
+            text2 = self.extract_with_pymupdf(pdf_file)
+            
+            # Choose the method that gives more content
+            raw_text = text1 if len(text1) > len(text2) else text2
+        
+        if not raw_text.strip():
+            return None, None, None
+        
+        # Clean and preserve formatting
+        cleaned_text = self.clean_and_preserve_formatting(raw_text)
+        
+        # Identify document structure
+        structure = self.identify_document_structure(cleaned_text)
+        
+        # Convert to HTML
+        html_output = self.convert_to_html(cleaned_text, structure)
+        
+        return cleaned_text, html_output, structure
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_process_path, p): p for p in file_paths}
-        for fut in as_completed(futures):
-            results.append(fut.result())
-    return results
-
-# ----------------------
-# Streamlit UI (lightweight) - use this file as the Streamlit app entrypoint
-# ----------------------
-
+# Streamlit App
 def main():
-    st.set_page_config(page_title="Legal Judgment Extractor", page_icon="⚖️", layout="wide")
-    st.title("⚖️ Legal Judgment Extractor — Robust Edition")
-
-    st.sidebar.header("Extraction settings")
-    backend_choice = st.sidebar.selectbox("Preferred backend", [b.__class__.__name__ for b in ( [PdfPlumberExtractor()] if pdfplumber else [] ) + ( [PyPDF2Extractor()] if PyPDF2 else [] ) + ( [PdfMinerExtractor()] if pdfminer_extract_text else [] )])
-    ocr_toggle = st.sidebar.checkbox("Enable OCR fallback (slow)", value=Config.OCR_ENABLED)
-    workers = st.sidebar.number_input("Batch workers (local)", min_value=1, max_value=64, value=Config.DEFAULT_WORKERS)
-
-    st.markdown("---")
-    uploaded_file = st.file_uploader("Upload judgment PDF", type=['pdf'])
-
-    if uploaded_file is not None:
-        st.info("Processing — this may take a few seconds depending on backend")
-        pipeline = JudgmentPipeline(ocr_enabled=ocr_toggle)
-        ok, result = pipeline.process(uploaded_file)
-        if not ok:
-            st.error(f"Extraction failed: {result.get('error')}")
-            if result.get('detail'):
-                st.write(result.get('detail'))
-            return
-        st.success("Extraction successful")
-        st.subheader("Metadata")
-        st.json(result['metadata'])
-
-        st.subheader("Raw text")
-        st.text_area("Raw text:", result['raw_text'], height=300)
-
-        st.subheader("HTML preview")
-        st.components.v1.html(result['html'], height=600, scrolling=True)
-
-        st.download_button("Download HTML", result['html'], file_name="judgment.html", mime='text/html')
-        st.download_button("Download text", result['raw_text'], file_name="judgment.txt", mime='text/plain')
-        st.download_button("Download metadata (JSON)", json.dumps(result['metadata'], indent=2), file_name="metadata.json", mime='application/json')
-
-    st.markdown("---")
-    st.subheader("Production & scaling notes")
+    st.set_page_config(
+        page_title="Legal Judgment Text Extractor",
+        page_icon="⚖️",
+        layout="wide"
+    )
+    
+    st.title("⚖️ Legal Judgment Text Extractor")
     st.markdown("""
-- For **hundreds of millions** of PDFs you will need a distributed processing layer (Dask, Celery, or Apache Airflow + autoscaled workers on Kubernetes).
-- Store inputs & outputs in object storage (S3/GCS) and keep processing idempotent.
-- Use a lightweight message queue (RabbitMQ/Kafka) to schedule jobs and horizontal scale consumers.
-- Enable OCR only for pages with low/no extracted text (you can detect this cheaply using pdfplumber's `extract_words` count).
-- Prefer `pdfplumber` for layout-heavy district court judgments — it gives word positions which we use to reconstruct paragraphs.
-- For bulk entity extraction (judges, parties), consider training a small spaCy NER model to improve accuracy over heuristics.
-""")
+    This tool extracts text from legal judgment PDFs while maintaining original formatting, numbering, and structure.
+    Specifically designed for district court cases with varying formats.
+    """)
+    
+    # Sidebar for configuration
+    st.sidebar.header("⚙️ Configuration")
+    
+    extraction_method = st.sidebar.selectbox(
+        "Choose Extraction Method:",
+        ["Auto-detect", "pdfplumber", "PyMuPDF", "PyPDF2"],
+        help="Auto-detect will try multiple methods and choose the best result"
+    )
+    
+    show_structure = st.sidebar.checkbox("Show Document Structure Analysis", value=True)
+    show_raw_text = st.sidebar.checkbox("Show Raw Extracted Text", value=False)
+    
+    # Main interface
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.header("📁 Upload PDF")
+        uploaded_file = st.file_uploader(
+            "Choose a legal judgment PDF file",
+            type=['pdf'],
+            help="Upload a PDF file containing a legal judgment"
+        )
+        
+        if uploaded_file is not None:
+            st.success(f"File uploaded: {uploaded_file.name}")
+            st.info(f"File size: {len(uploaded_file.getvalue())/1024:.1f} KB")
+            
+            # Extract text
+            with st.spinner("Extracting text from PDF..."):
+                extractor = LegalJudgmentExtractor()
+                extracted_text, html_output, structure = extractor.extract_judgment(
+                    uploaded_file, extraction_method
+                )
+            
+            if extracted_text:
+                st.success("✅ Text extraction completed!")
+                
+                # Document structure analysis
+                if show_structure and structure:
+                    st.subheader("📊 Document Structure Analysis")
+                    structure_df = pd.DataFrame([
+                        {"Element": "Case Number", "Value": structure.get('case_number', 'Not found')},
+                        {"Element": "Court Name", "Value": structure.get('court_name', 'Not found')},
+                        {"Element": "Date", "Value": structure.get('date', 'Not found')},
+                        {"Element": "Judge", "Value": structure.get('judge', 'Not found')},
+                    ])
+                    st.dataframe(structure_df, use_container_width=True)
+                
+                # Download options
+                st.subheader("💾 Download Options")
+                col_dl1, col_dl2 = st.columns(2)
+                
+                with col_dl1:
+                    # Download as HTML
+                    html_bytes = html_output.encode('utf-8')
+                    st.download_button(
+                        label="📄 Download as HTML",
+                        data=html_bytes,
+                        file_name=f"judgment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                        mime="text/html"
+                    )
+                
+                with col_dl2:
+                    # Download as TXT
+                    txt_bytes = extracted_text.encode('utf-8')
+                    st.download_button(
+                        label="📝 Download as Text",
+                        data=txt_bytes,
+                        file_name=f"judgment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+                
+                # Show raw extracted text if requested
+                if show_raw_text:
+                    st.subheader("📄 Raw Extracted Text")
+                    st.text_area("Raw Text:", extracted_text, height=300)
+            else:
+                st.error("❌ Failed to extract text from the PDF. Please try a different extraction method.")
+    
+    with col2:
+        st.header("👁️ HTML Preview")
+        
+        if 'html_output' in locals() and html_output:
+            # Create a preview of the HTML
+            st.subheader("🔍 Formatted Output Preview")
+            
+            # Display HTML in an iframe-like component
+            st.components.v1.html(
+                html_output,
+                height=600,
+                scrolling=True
+            )
+            
+        else:
+            st.info("👆 Upload a PDF file to see the formatted preview here")
+            
+            # Show sample judgment structure
+            st.subheader("📋 Sample Judgment Structure")
+            sample_html = """
+            <div style="font-family: 'Times New Roman', serif; padding: 20px; border: 1px solid #ddd;">
+                <div style="text-align: center; margin-bottom: 20px; border-bottom: 2px solid #000; padding-bottom: 10px;">
+                    <div style="font-weight: bold;">OMP (I) Comm. No. 800/20</div>
+                    <div style="font-weight: bold; font-size: 16px; margin: 10px 0;">
+                        HDB FINANCIAL SERVICES LTD VS THE DEOBAND PUBLIC SCHOOL
+                    </div>
+                    <div style="font-weight: bold;">13.02.2020</div>
+                    <div style="font-style: italic; margin: 15px 0;">
+                        Present : Sh. Ashok Kumar Ld. Counsel for petitioner.
+                    </div>
+                </div>
+                <div style="margin: 15px 0; text-align: justify;">
+                    This is a petition u/s 9 of Indian Arbitration and Conciliation Act 1996...
+                </div>
+                <div style="margin: 10px 0; margin-left: 20px;">
+                    (i) The receiver shall take over the possession of the vehicle...
+                </div>
+                <div style="margin-top: 40px; text-align: right;">
+                    <div style="font-weight: bold; margin-top: 20px;">VINAY KUMAR KHANNA</div>
+                    <div style="font-size: 12px; margin-top: 5px;">District Judge</div>
+                </div>
+            </div>
+            """
+            st.components.v1.html(sample_html, height=400)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    **Features:**
+    - 📄 Maintains original numbering and sub-numbering
+    - 🔤 Preserves document structure and formatting
+    - 🏛️ Handles various district court judgment formats
+    - 📱 Responsive HTML output with proper styling
+    - 💾 Multiple download formats (HTML, TXT)
+    - 🔍 Document structure analysis
+    - ⚡ Scalable for processing millions of cases
+    """)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    # Install required packages
+    st.markdown("""
+    **Required packages:**
+    ```bash
+    pip install streamlit PyPDF2 pdfplumber PyMuPDF pandas
+    ```
+    """)
+    
     main()
