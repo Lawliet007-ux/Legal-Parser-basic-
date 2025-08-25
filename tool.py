@@ -1,26 +1,42 @@
 import streamlit as st
-import pdfplumber
+from io import StringIO, BytesIO
+from pdfminer.high_level import extract_text_to_fp
+from pdfminer.layout import LAParams
 
-st.title("Legal Judgment PDF to HTML Converter")
+st.title("Legal Judgment PDF to HTML Converter (Improved)")
 
 st.markdown("""
-This tool extracts text from uploaded legal judgment PDFs while preserving the original structure, numbering, sub-numbering, and text alignment as closely as possible. 
-The output is generated in HTML format, with a preview displayed below. The HTML uses a monospace font and preserves whitespace to mimic the PDF layout.
+This tool uses pdfminer.six to convert uploaded legal judgment PDFs to HTML while preserving the original layout, structure, text alignment, numberings, and sub-numberings as closely as possible. 
+The output HTML uses CSS for positioning to mimic the PDF structure accurately.
+**Note:** Ensure pdfminer.six is installed in your environment: `pip install pdfminer.six`.
 """)
 
 uploaded_file = st.file_uploader("Upload your judgment PDF file", type=["pdf"])
 
 if uploaded_file is not None:
     try:
-        with pdfplumber.open(uploaded_file) as pdf:
-            full_text = ""
-            for i, page in enumerate(pdf.pages, start=1):
-                # Extract text with layout preservation (inserts spaces and newlines to mimic original positions)
-                page_text = page.extract_text(layout=True)
-                if page_text:
-                    full_text += page_text.strip() + f"\n\n"  # Strip trailing spaces but preserve internal layout
+        output_string = StringIO()
+        # Use LAParams with adjusted parameters for better layout preservation
+        laparams = LAParams(
+            detect_vertical=True,
+            all_texts=False,
+            char_margin=1.0,  # Tighter char margin for better word grouping
+            line_margin=0.3,  # Adjust line overlap for accurate line detection
+            word_margin=0.1   # Word spacing detection
+        )
+        extract_text_to_fp(
+            BytesIO(uploaded_file.getvalue()),
+            output_string,
+            laparams=laparams,
+            output_type='html',
+            codec=None,
+            maxpages=0,  # Process all pages
+            caching=True,
+            scale=1
+        )
+        extracted_html = output_string.getvalue()
 
-        # Generate HTML content that preserves the structure using <pre> tag
+        # Wrap the extracted HTML in a full HTML document with basic styling for better rendering
         html_content = f"""
         <!DOCTYPE html>
         <html lang="en">
@@ -30,25 +46,20 @@ if uploaded_file is not None:
             <title>Extracted Judgment</title>
             <style>
                 body {{
-                    font-family: monospace;
+                    font-family: serif;  /* Use serif font to mimic legal documents */
                     margin: 20px;
                     background-color: #f9f9f9;
                 }}
-                pre {{
-                    white-space: pre-wrap;
-                    word-wrap: break-word;
-                    font-size: 12px;
-                    line-height: 1.2;
-                    padding: 20px;
-                    background-color: white;
-                    border: 1px solid #ddd;
-                    overflow-x: auto;
+                div {{
+                    position: absolute;  /* Preserve absolute positioning from pdfminer */
+                }}
+                .txt {{
+                    white-space: pre;  /* Preserve whitespace in text blocks */
                 }}
             </style>
         </head>
         <body>
-            <h1>Extracted Judgment Text</h1>
-            <pre>{full_text}</pre>
+            {extracted_html}
         </body>
         </html>
         """
@@ -67,11 +78,12 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"An error occurred while processing the PDF: {str(e)}")
-        st.info("Please ensure the uploaded file is a valid PDF. For best results, use PDFs with text layers (not scanned images).")
+        st.info("Please ensure the uploaded file is a valid PDF with extractable text (not scanned images). For scanned PDFs, OCR tools like Tesseract may be needed separately.")
 
 st.markdown("""
 **Notes:**
-- This tool uses layout-preserving text extraction to maintain originality, including numberings, alignments, and structure.
-- It is designed to handle varying formats in district court cases, but results may vary with scanned or image-based PDFs (OCR not included).
-- For large-scale processing (e.g., hundreds of millions of cases), consider deploying this as a batch script or integrating with cloud services for scalability.
+- This improved version uses pdfminer.six's layout analysis to generate HTML with positioned elements, aiming for a near-carbon copy of the original PDF structure and alignment.
+- It handles varying formats in district court cases by analyzing text blocks, lines, and characters precisely.
+- For large-scale processing, consider batch scripts or cloud deployment. Results may still vary slightly due to PDF complexities, but this should be much closer to the original.
+- If further tuning is needed, adjust LAParams values in the code for specific PDF formats.
 """)
