@@ -1,10 +1,10 @@
+# tool.py
 import streamlit as st
 import fitz  # PyMuPDF
 import io
 import base64
 import os
 import html
-import tempfile
 from PIL import Image
 
 # Optional OCR
@@ -17,16 +17,15 @@ except Exception:
 st.set_page_config(page_title="Legal Judgment PDF → HTML (High-fidelity)", layout="wide")
 
 # ---------- Helpers ----------
-
 def to_data_url(pix):
     """Return a PNG data URL from a PyMuPDF Pixmap."""
     img_bytes = pix.tobytes("png")
     b64 = base64.b64encode(img_bytes).decode('ascii')
     return f"data:image/png;base64,{b64}"
 
-
 def extract_layout_pages(pdf_bytes, render_dpi=150):
-    """Extract page images and exact text spans (with positions and font info).
+    """
+    Extract page images and exact text spans (with positions and font info).
     Returns list of pages: {width_px, height_px, img, spans: [{x,y,w,h,text,font,size}]}
     Coordinates are in pixels with origin at top-left matching the rendered image.
     """
@@ -66,9 +65,9 @@ def extract_layout_pages(pdf_bytes, render_dpi=150):
     doc.close()
     return pages
 
-
 def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
-    """Generate HTML with page images as background and absolutely positioned spans on top.
+    """
+    Generate HTML with page images as background and absolutely positioned spans on top.
     include_image: whether to include the original rendered image as background.
     fonts_dict: optional dict map fontname->base64-ttf to embed via @font-face.
     """
@@ -88,25 +87,24 @@ def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
                 "}"
             )
             font_faces.append(face)
-    font_css = "
-".join(font_faces)
+    font_css = "\n".join(font_faces)
 
-    for idx, p in enumerate(pages):
+    for p in pages:
         # container matches rendered image size
         w = p['width_px']
         h = p['height_px']
         bg_style = ''
         if include_image:
+            # safe-quote URL inside single quotes
             bg_style = f"background-image:url('{p['img']}'); background-size: {w}px {h}px; background-repeat:no-repeat;"
-        # Build spans HTML. We'll keep each span in its own div/span with no wrapping to preserve exact placement.
+        # Build spans HTML. Each span in its own div to preserve exact placement.
         spans_html = []
         for s in p['spans']:
             if not s['text']:
                 continue
-            # sanitize text but keep spaces
-            content = html.escape(s['text']).replace('
-', '<br/>')
-            # Heuristic: make font-size about 90% of span height
+            # sanitize text but keep whitespace/newlines converted
+            content = html.escape(s['text']).replace('\n', '<br/>')
+            # Heuristic: font-size about 90% of span height
             font_px = max(6, s['h'] * 0.9)
 
             # derive a simple font-family from PyMuPDF font name
@@ -119,69 +117,44 @@ def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
                 f"font-size:{font_px:.2f}px; line-height:1; {font_family_css} "
                 "white-space:pre; overflow:hidden;"
             )
-            # make the text background transparent so image shows through if desired
             span_html = f"<div class=\"text-span\" style=\"{span_style}\">{content}</div>"
             spans_html.append(span_html)
 
         page_html = (
-            f"<div class='pdf-page' style='position:relative; width:{w}px; height:{h}px; {bg_style}'>
-"
-            f"{''.join(spans_html)}
-"
-            f"</div>
-"
+            f"<div class='pdf-page' style='position:relative; width:{w}px; height:{h}px; {bg_style}'>\n"
+            f"{''.join(spans_html)}\n"
+            f"</div>\n"
         )
         pages_html.append(page_html)
 
     css = (
-        "<style>
-"
-        f"{font_css}
-"
-        "body { background:#ececec; margin:0; font-family: Georgia, 'Times New Roman', serif; }
-"
-        ".viewer { display:flex; flex-direction:column; align-items:center; gap:20px; padding:20px; }
-"
-        ".pdf-page { box-shadow:0 6px 18px rgba(0,0,0,0.12); background-color:white; }
-"
-        ".text-span { color: rgba(0,0,0,0.98); }
-"
-        "</style>
-"
+        "<style>\n"
+        f"{font_css}\n"
+        "body { background:#ececec; margin:0; font-family: Georgia, 'Times New Roman', serif; }\n"
+        ".viewer { display:flex; flex-direction:column; align-items:center; gap:20px; padding:20px; }\n"
+        ".pdf-page { box-shadow:0 6px 18px rgba(0,0,0,0.12); background-color:white; }\n"
+        ".text-span { color: rgba(0,0,0,0.98); }\n"
+        "</style>\n"
     )
 
     html_full = (
-        "<!doctype html>
-"
-        "<html>
-"
-        "<head>
-"
-        "<meta charset='utf-8'/>
-"
-        "<title>High-fidelity Judgment Export</title>
-"
-        f"{css}
-"
-        "</head>
-"
-        "<body>
-"
-        "<div class='viewer'>
-"
-        f"{''.join(pages_html)}
-"
-        "</div>
-"
-        "</body>
-"
-        "</html>
-"
+        "<!doctype html>\n"
+        "<html>\n"
+        "<head>\n"
+        "<meta charset='utf-8'/>\n"
+        "<title>High-fidelity Judgment Export</title>\n"
+        f"{css}\n"
+        "</head>\n"
+        "<body>\n"
+        "<div class='viewer'>\n"
+        f"{''.join(pages_html)}\n"
+        "</div>\n"
+        "</body>\n"
+        "</html>\n"
     )
     return html_full
 
 # ---------- Streamlit UI ----------
-
 st.title("High-fidelity Legal Judgment PDF → HTML (Carbon-copy approach)")
 st.markdown(
     """
@@ -197,7 +170,7 @@ This version aims to produce a **near-carbon copy** of the input PDF by:
 """
 )
 
-uploaded = st.file_uploader("Upload judgment PDF", type=["pdf"]) 
+uploaded = st.file_uploader("Upload judgment PDF", type=["pdf"])
 render_dpi = st.slider("Render DPI (increase for higher fidelity)", min_value=72, max_value=300, value=150, step=10)
 include_image = st.checkbox("Include original rendered page images (recommended)", value=True)
 use_ocr = st.checkbox("Force OCR (if PDF is scanned)", value=False)
@@ -257,14 +230,10 @@ if uploaded is not None:
     st.subheader("Preview")
     st.components.v1.html(html_out, height=900, scrolling=True)
 
-    st.download_button("Download HTML", data=html_out.encode('utf-8'), file_name=os.path.splitext(uploaded.name)[0]+"_export.html", mime='text/html')
+    st.download_button("Download HTML", data=html_out.encode('utf-8'),
+                       file_name=os.path.splitext(uploaded.name)[0] + "_export.html", mime='text/html')
 
     st.markdown("---")
-    st.markdown("**If you want a closer match:**
-
-- Upload original TTF fonts used by the court (if available).
-- Increase Render DPI to 200-300.
-- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
-
+    st.markdown("**If you want a closer match:**\n\n- Upload original TTF fonts used by the court (if available).\n- Increase Render DPI to 200-300.\n- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
 else:
     st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
