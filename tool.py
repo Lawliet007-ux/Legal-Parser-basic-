@@ -27,7 +27,7 @@ def to_data_url(pix):
 
 def extract_layout_pages(pdf_bytes, render_dpi=150):
     """Extract page images and exact text spans (with positions and font info).
-    Returns list of pages: {width_px, height_px, img_dataurl, spans: [{x,y,w,h,text,font,size}]}
+    Returns list of pages: {width_px, height_px, img, spans: [{x,y,w,h,text,font,size}]}
     Coordinates are in pixels with origin at top-left matching the rendered image.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -67,11 +67,10 @@ def extract_layout_pages(pdf_bytes, render_dpi=150):
     return pages
 
 
-def generate_high_fidelity_html(pages, overlay_opacity=0.0, include_image=True, embed_fonts=False, fonts_dict=None):
+def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
     """Generate HTML with page images as background and absolutely positioned spans on top.
-    overlay_opacity: opacity of the image (0 = invisible image, 1 = fully visible). If image invisible, the page text overlay will be visible (selectable).
     include_image: whether to include the original rendered image as background.
-    fonts_dict: optional dict map fontname->base64-ttf to embed via @font-face. keys should be safe font-family names.
+    fonts_dict: optional dict map fontname->base64-ttf to embed via @font-face.
     """
     pages_html = []
 
@@ -80,14 +79,15 @@ def generate_high_fidelity_html(pages, overlay_opacity=0.0, include_image=True, 
     if fonts_dict:
         for fname, b64 in fonts_dict.items():
             safe_name = fname.replace(' ', '_')
-            font_faces.append("""
-@font-face {
-  font-family: '%s';
-  src: url(data:font/ttf;charset=utf-8;base64,%s) format('truetype');
-  font-weight: normal;
-  font-style: normal;
-}
-""" % (safe_name, b64))
+            face = (
+                "@font-face {"
+                f"font-family: '{safe_name}';"
+                f"src: url(data:font/ttf;charset=utf-8;base64,{b64}) format('truetype');"
+                "font-weight: normal;"
+                "font-style: normal;"
+                "}"
+            )
+            font_faces.append(face)
     font_css = "
 ".join(font_faces)
 
@@ -104,63 +104,88 @@ def generate_high_fidelity_html(pages, overlay_opacity=0.0, include_image=True, 
             if not s['text']:
                 continue
             # sanitize text but keep spaces
-            content = html.escape(s['text']).replace('\n', '<br/>')
-            # font-size scaled to px: span size is in points; rendered px size = size * (render_dpi / 72)
-            # However earlier we already converted bbox coords to px using same scale; we'll compute font-size in px similarly
-            font_px = s['size'] * (p['height_px'] / (p['height_px'] / (s['h'] / (s['size'] if s['size'] else 1))) ) if False else s['size'] * (p['height_px'] / p['height_px'])
-            # Simpler: convert size in points to px using 96/72 as default approximation then scale to rendered DPI
-            # But we don't have original render_dpi here; assume px size is size * (96/72) * (p_width_px / p_width_points) - complicated.
-            # Use a practical approach: set font-size to h*0.9 to fit inside bbox height
-            font_px = max(8, s['h'] * 0.9)
+            content = html.escape(s['text']).replace('
+', '<br/>')
+            # Heuristic: make font-size about 90% of span height
+            font_px = max(6, s['h'] * 0.9)
 
-            # font-family fallback: try to use the font name directly; user can supply font upload to map names
-            font_family = s['font'].split('+')[-1].split('-')[0]
+            # derive a simple font-family from PyMuPDF font name
+            font_family = s['font'].split('+')[-1].split('-')[0] if s['font'] else 'serif'
             font_family_css = f"font-family: '{font_family}', serif;"
 
-            span_style = f"position:absolute; left:{s['x']:.2f}px; top:{s['y']:.2f}px; width:{s['w']:.2f}px; height:{s['h']:.2f}px; font-size:{font_px:.2f}px; line-height:1; {font_family_css} white-space:pre; overflow:hidden;"
+            span_style = (
+                f"position:absolute; left:{s['x']:.2f}px; top:{s['y']:.2f}px; "
+                f"width:{s['w']:.2f}px; height:{s['h']:.2f}px; "
+                f"font-size:{font_px:.2f}px; line-height:1; {font_family_css} "
+                "white-space:pre; overflow:hidden;"
+            )
             # make the text background transparent so image shows through if desired
             span_html = f"<div class=\"text-span\" style=\"{span_style}\">{content}</div>"
             spans_html.append(span_html)
 
-        page_html = f"""
-<div class='pdf-page' style='position:relative; width:{w}px; height:{h}px; {bg_style}'>
-{''.join(spans_html)}
-</div>
-"""
+        page_html = (
+            f"<div class='pdf-page' style='position:relative; width:{w}px; height:{h}px; {bg_style}'>
+"
+            f"{''.join(spans_html)}
+"
+            f"</div>
+"
+        )
         pages_html.append(page_html)
 
-    css = f"""
-<style>
-{font_css}
-body {{ background:#ececec; margin:0; font-family: Georgia, 'Times New Roman', serif; }}
-.viewer {{ display:flex; flex-direction:column; align-items:center; gap:20px; padding:20px; }}
-.pdf-page {{ box-shadow:0 6px 18px rgba(0,0,0,0.12); background-color:white; }}
-.text-span {{ color: rgba(0,0,0,0.98); }}
-</style>
-"""
+    css = (
+        "<style>
+"
+        f"{font_css}
+"
+        "body { background:#ececec; margin:0; font-family: Georgia, 'Times New Roman', serif; }
+"
+        ".viewer { display:flex; flex-direction:column; align-items:center; gap:20px; padding:20px; }
+"
+        ".pdf-page { box-shadow:0 6px 18px rgba(0,0,0,0.12); background-color:white; }
+"
+        ".text-span { color: rgba(0,0,0,0.98); }
+"
+        "</style>
+"
+    )
 
-    html_full = f"""
-<!doctype html>
-<html>
-<head>
-<meta charset='utf-8'/>
-<title>High-fidelity Judgment Export</title>
-{css}
-</head>
-<body>
-<div class='viewer'>
-{''.join(pages_html)}
-</div>
-</body>
-</html>
-"""
+    html_full = (
+        "<!doctype html>
+"
+        "<html>
+"
+        "<head>
+"
+        "<meta charset='utf-8'/>
+"
+        "<title>High-fidelity Judgment Export</title>
+"
+        f"{css}
+"
+        "</head>
+"
+        "<body>
+"
+        "<div class='viewer'>
+"
+        f"{''.join(pages_html)}
+"
+        "</div>
+"
+        "</body>
+"
+        "</html>
+"
+    )
     return html_full
 
 # ---------- Streamlit UI ----------
 
 st.title("High-fidelity Legal Judgment PDF → HTML (Carbon-copy approach)")
-st.markdown("""
-This version aims to produce a **near-carbon copy** of the input PDF by: 
+st.markdown(
+    """
+This version aims to produce a **near-carbon copy** of the input PDF by:
 
 - Rendering each PDF page as a high-resolution image.
 - Overlaying the *exact* text spans (positions, approximate font-sizes) over that image so the result looks identical while keeping selectable/searchable text.
@@ -169,9 +194,10 @@ This version aims to produce a **near-carbon copy** of the input PDF by:
 - Increase the DPI slider for higher-fidelity images (at cost of memory / time).
 - If you have original fonts (.ttf), upload them to embed for better match.
 - For scanned PDFs, enable OCR to extract word-level boxes.
-""")
+"""
+)
 
-uploaded = st.file_uploader("Upload judgment PDF", type=["pdf"] )
+uploaded = st.file_uploader("Upload judgment PDF", type=["pdf"]) 
 render_dpi = st.slider("Render DPI (increase for higher fidelity)", min_value=72, max_value=300, value=150, step=10)
 include_image = st.checkbox("Include original rendered page images (recommended)", value=True)
 use_ocr = st.checkbox("Force OCR (if PDF is scanned)", value=False)
@@ -187,7 +213,7 @@ if uploaded is not None:
         try:
             pages = extract_layout_pages(pdf_bytes, render_dpi=render_dpi)
             total_spans = sum(len(p['spans']) for p in pages)
-            if total_spans == 0 and (use_ocr or (not pages) ) and OCR_AVAILABLE:
+            if total_spans == 0 and (use_ocr or (not pages)) and OCR_AVAILABLE:
                 st.warning("No text spans found — falling back to OCR per page.")
                 # do simple OCR per rendered image
                 ocr_pages = []
