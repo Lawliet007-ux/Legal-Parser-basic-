@@ -1,131 +1,192 @@
 import streamlit as st
-import pypdf2htmlex
+import fitz  # PyMuPDF
+import io
+import base64
+import os
+import math
+from PIL import Image
 import tempfile
-import os
-import zipfile
-from io import BytesIO
+import html
 
-st.title("Legal Judgment PDF to HTML Converter (High-Fidelity Layout Preservation)")
+# Optional OCR
+try:
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    OCR_AVAILABLE = True
+except Exception:
+    OCR_AVAILABLE = False
 
-st.markdown("""
-This tool uses **pdf2htmlEX** via a Python wrapper to convert uploaded legal judgment PDFs to HTML, preserving the original layout, structure, text alignment, fonts, and formatting as closely as possible—aiming for a near-carbon copy of the PDF.
+st.set_page_config(page_title="Legal Judgment PDF → HTML (Preserve Layout)", layout="wide")
 
-**Important Prerequisite:** You must have `pdf2htmlEX` installed on your system.
-- On Ubuntu: `sudo apt-get install pdf2htmlex`
-- Other OS: see [installation guide](https://github.com/pdf2htmlEX/pdf2htmlEX/wiki/Building-and-Installing)
+# -----------------------------
+# Helpers
+# -----------------------------
 
-Install the Python wrapper with:
-```bash
-pip install pypdf2htmlex
-```
-""")
+def points_to_px(val, scale=96/72):
+    """Convert PDF points (72dpi) to CSS pixels (approx 96dpi)."""
+    return val * scale
 
-# ===================
-# Single file uploader
-# ===================
-uploaded_file = st.file_uploader("Upload a single judgment PDF file", type=["pdf"])
 
-if uploaded_file is not None:
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-            tmp.write(uploaded_file.getvalue())
-            tmp_path = tmp.name
+def extract_pages_with_pymupdf(pdf_bytes):
+    """Extract text blocks and layout info from PDF using PyMuPDF.
+    Returns list of pages where each page is dict with width,height and blocks.
+    Each block: {"bbox":(x0,y0,x1,y1), "text": str, "font_size": float (approx)}
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = []
+    for page in doc:
+        page_dict = page.get_text("dict")
+        rect = page.rect
+        page_w, page_h = rect.width, rect.height
+        blocks = []
+        for block in page_dict.get("blocks", []):
+            if block["type"] == 0:  # text block
+                bbox = block.get("bbox")
+                text = "\n".join([line.get("spans")[0].get("text") if line.get("spans") else "" for line in block.get("lines", [])])
+                # estimate font size from first span
+                font_size = None
+                try:
+                    spans = block.get("lines")[0].get("spans")
+                    if spans:
+                        font_size = spans[0].get("size")
+                except Exception:
+                    font_size = None
+                blocks.append({"bbox":bbox, "text":text, "font_size":font_size})
+        pages.append({"width": page_w, "height": page_h, "blocks": blocks})
+    doc.close()
+    return pages
 
-        pdf = pypdf2htmlEX.PDF(tmp_path)
-        pdf.to_html(drm=False)  # Convert to HTML
 
-        # Output HTML path
-        html_path = os.path.splitext(tmp_path)[0] + '.html'
-        with open(html_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
+def generate_html_from_pages(pages, page_scale=96/72):
+    """Generate an HTML string with absolutely positioned text blocks to mimic layout.
+    """
+    page_divs = []
+    for i, p in enumerate(pages):
+        w_px = points_to_px(p["width"], page_scale)
+        h_px = points_to_px(p["height"], page_scale)
+        blocks_html = []
+        for b in p["blocks"]:
+            x0, y0, x1, y1 = b["bbox"]
+            left = points_to_px(x0, page_scale)
+            top = points_to_px(y0, page_scale)
+            width = max(1, points_to_px(x1 - x0, page_scale))
+            height = max(1, points_to_px(y1 - y0, page_scale))
+            # sanitize text for HTML
+            content = html.escape(b["text"]).replace('\n', '<br/>')
+            font_size_px = ''
+            if b.get("font_size"):
+                # convert font size points -> px
+                font_size_px = f"font-size: {points_to_px(b['font_size'], page_scale):.1f}px;"
+            div = f'<div class="text-block" style="position:absolute; left:{left:.1f}px; top:{top:.1f}px; width:{width:.1f}px; height:{height:.1f}px; {font_size_px}overflow-wrap:break-word;">{content}</div>'
+            blocks_html.append(div)
+        page_html = f'<div class="pdf-page" style="position:relative; width:{w_px:.1f}px; height:{h_px:.1f}px; margin:20px auto; box-shadow:0 0 0.5rem rgba(0,0,0,0.1); background:white;">' + "\n".join(blocks_html) + '</div>'
+        page_divs.append(page_html)
 
-        # Display preview in Streamlit UI
-        st.subheader("HTML Preview (Single File)")
-        st.components.v1.html(html_content, height=800, scrolling=True)
+    css = """
+    <style>
+    body { background:#f0f0f0; font-family: Georgia, 'Times New Roman', serif; }
+    .pdf-container { display:flex; flex-direction:column; align-items:center; }
+    .pdf-page { border:1px solid #ddd; }
+    .text-block { white-space: pre-wrap; }
+    </style>
+    """
 
-        # Provide download button
-        st.download_button(
-            label="Download HTML File",
-            data=html_content,
-            file_name=f"{uploaded_file.name.replace('.pdf', '')}.html",
-            mime="text/html"
-        )
+    html_full = f"""
+    <!doctype html>
+    <html>
+    <head>
+    <meta charset=\"utf-8\" />
+    <title>Converted Judgment</title>
+    {css}
+    </head>
+    <body>
+    <div class="pdf-container">
+    {"".join(page_divs)}
+    </div>
+    </body>
+    </html>
+    """
+    return html_full
 
-        # Clean up temp files
-        os.unlink(tmp_path)
-        os.unlink(html_path)
 
-    except Exception as e:
-        st.error(f"An error occurred while processing the PDF: {str(e)}")
-        st.info("Ensure pdf2htmlEX is installed and accessible in your system's PATH.")
+def ocr_pages(pdf_bytes):
+    """Fallback OCR: convert pages to images and run pytesseract to get text.
+    Returns list of pages each as simple text blob.
+    """
+    images = convert_from_bytes(pdf_bytes)
+    pages = []
+    for img in images:
+        text = pytesseract.image_to_string(img, lang='eng')
+        pages.append({"width": img.width, "height": img.height, "blocks": [{"bbox": (0,0,img.width,img.height), "text": text, "font_size": None}]})
+    return pages
 
-# ========================
-# Multiple file uploader
-# ========================
-uploaded_files = st.file_uploader("Upload multiple judgment PDF files for batch processing", type=["pdf"], accept_multiple_files=True)
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 
-if uploaded_files:
-    try:
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for file in uploaded_files:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                    tmp.write(file.getvalue())
-                    tmp_path = tmp.name
+st.title("Legal Judgment PDF → HTML (Preserve layout & numbering)")
+st.markdown(
+    """
+    Upload a judgement PDF and this tool will attempt to reproduce the PDF's text and structure in an HTML page.
 
-                pdf = pypdf2htmlEX.PDF(tmp_path)
-                pdf.to_html(drm=False)
+    **Key points:**
+    - Uses PyMuPDF to extract text *with layout blocks* and repositions them in HTML to resemble the original.
+    - Optional OCR fallback using pytesseract/pdf2image for scanned PDFs (requires external Tesseract & poppler).
+    - Preview HTML in the app and download the final HTML file.
+    """
+)
 
-                html_path = os.path.splitext(tmp_path)[0] + '.html'
-                with open(html_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
+uploaded = st.file_uploader("Upload PDF file", type=["pdf"])
+use_ocr = st.checkbox("Use OCR fallback for scanned pages (requires pytesseract + poppler)", value=False)
 
-                # Add to zip
-                zip_file.writestr(f"{file.name.replace('.pdf', '')}.html", html_content)
+if uploaded is not None:
+    pdf_bytes = uploaded.read()
+    st.info(f"File uploaded: {uploaded.name} — {len(pdf_bytes):,} bytes")
 
-                # Clean up
-                os.unlink(tmp_path)
-                os.unlink(html_path)
+    with st.spinner("Extracting layout from PDF using PyMuPDF..."):
+        try:
+            pages = extract_pages_with_pymupdf(pdf_bytes)
+            # If no text blocks found and OCR available and user selected OCR, fallback
+            total_blocks = sum(len(p['blocks']) for p in pages)
+            if total_blocks == 0 and use_ocr and OCR_AVAILABLE:
+                st.warning("No text blocks found — trying OCR fallback on all pages.")
+                pages = ocr_pages(pdf_bytes)
+            elif total_blocks == 0 and use_ocr and not OCR_AVAILABLE:
+                st.error("OCR requested but pytesseract/pdf2image not available in environment.")
+        except Exception as e:
+            st.error(f"Error extracting PDF: {e}")
+            st.stop()
 
-        zip_buffer.seek(0)
-        st.download_button(
-            label="Download All HTML Files as ZIP",
-            data=zip_buffer,
-            file_name="converted_judgments.zip",
-            mime="application/zip"
-        )
+    # Generate HTML
+    html_out = generate_html_from_pages(pages)
 
-        st.success("Batch conversion completed. Download the ZIP file containing all HTML outputs.")
+    st.subheader("HTML Preview")
+    # Display preview in a resizable iframe-like area
+    st.components.v1.html(html_out, height=800, scrolling=True)
 
-    except Exception as e:
-        st.error(f"An error occurred during batch processing: {str(e)}")
+    # Download
+    st.download_button(label="Download HTML", data=html_out.encode('utf-8'), file_name=os.path.splitext(uploaded.name)[0] + ".html", mime="text/html")
 
-st.markdown("""
-**Notes:**
-- This tool provides high-fidelity conversion, making the HTML output resemble the input PDF completely in structure, alignment, and appearance.
-- For processing **hundreds of millions of cases** with varying district court formats, Streamlit is suitable for interactive use but not ideal for massive scale. Use the following command-line Python script for batch processing large directories:
+    # Save requirements helper
+    if st.button("Show recommended requirements.txt"):
+        reqs = """
+streamlit
+PyMuPDF
+pdf2image
+pytesseract
+pillow
+pdfplumber
+"""
+        st.code(reqs)
 
-```python
-import pypdf2htmlEX
-import os
+    st.markdown("---")
+    st.markdown(
+        "**Notes & tips:**\n\n" 
+        "- This tool tries to reproduce spatial layout by absolutely positioning text blocks extracted by PyMuPDF (get_text(\"dict\")).\n"
+        "- Perfect pixel-for-pixel reproduction requires the original fonts and advanced rendering (not covered here).\n"
+        "- For scanned/bitmap PDFs enable OCR (requires system installation of Tesseract and poppler).\n"
+        "- If you want the app tuned to a set of sample judgments (court-specific styles), upload a few representative PDFs and I can help adjust CSS/font scaling rules to match them more closely.\n"
+    )
 
-def batch_convert_pdf_to_html(input_dir, output_dir=None, prefix=''):
-    if output_dir is None:
-        output_dir = input_dir
-    os.makedirs(output_dir, exist_ok=True)
-    for filename in os.listdir(input_dir):
-        if filename.lower().endswith('.pdf'):
-            pdf_path = os.path.join(input_dir, filename)
-            pdf = pypdf2htmlEX.PDF(pdf_path)
-            pdf.to_html(drm=False)
-            # pdf2htmlEX generates HTML in the same directory; move to output if different
-            html_filename = os.path.splitext(filename)[0] + '.html'
-            html_path = os.path.join(input_dir, html_filename)
-            if output_dir != input_dir:
-                os.rename(html_path, os.path.join(output_dir, prefix + html_filename))
-
-# Usage example:
-# batch_convert_pdf_to_html('path/to/input/folder', 'path/to/output/folder', 'Converted_')
-```
-""")
-
+else:
+    st.info("Upload a PDF to get started.")
