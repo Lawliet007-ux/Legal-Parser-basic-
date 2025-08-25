@@ -2,3 +2,4 @@ streamlit
 PyMuPDF
 pdfplumber
 PyPDF2
+pypdf2htmlEX
