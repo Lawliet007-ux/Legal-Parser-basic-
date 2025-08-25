@@ -1,5 +1,6 @@
 streamlit
 PyMuPDF
+pdf2image
+pytesseract
+pillow
 pdfplumber
-PyPDF2
-pypdf2htmlEX
