@@ -1,13 +1,4 @@
 streamlit
-pdfplumber
-PyPDF2
-pdfminer.six
-pillow
-pytesseract
-pdf2image
-
-streamlit
-PyPDF2
-pdfplumber
 PyMuPDF
-pandas
+pdfplumber
+PyPDF2
