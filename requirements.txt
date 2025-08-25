@@ -5,3 +5,9 @@ pdfminer.six
 pillow
 pytesseract
 pdf2image
+
+streamlit
+PyPDF2
+pdfplumber
+PyMuPDF
+pandas
