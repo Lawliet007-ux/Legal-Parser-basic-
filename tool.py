@@ -14,7 +14,7 @@ try:
 except Exception:
     OCR_AVAILABLE = False
 
-st.set_page_config(page_title="Legal Judgment PDF → HTML (High-fidelity)", layout="wide")
+st.set_page_config(page_title="Legal Judgment PDF → HTML ", layout="wide")
 
 # ---------- Helpers ----------
 def to_data_url(pix):
@@ -155,18 +155,10 @@ def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
     return html_full
 
 # ---------- Streamlit UI ----------
-st.title("High-fidelity Legal Judgment PDF → HTML (Carbon-copy approach)")
+st.title("High-fidelity Legal Judgment PDF → HTML")
 st.markdown(
     """
-This version aims to produce a **near-carbon copy** of the input PDF by:
 
-- Rendering each PDF page as a high-resolution image.
-- Overlaying the *exact* text spans (positions, approximate font-sizes) over that image so the result looks identical while keeping selectable/searchable text.
-
-**Tips:**
-- Increase the DPI slider for higher-fidelity images (at cost of memory / time).
-- If you have original fonts (.ttf), upload them to embed for better match.
-- For scanned PDFs, enable OCR to extract word-level boxes.
 """
 )
 
@@ -237,3 +229,4 @@ if uploaded is not None:
     st.markdown("**If you want a closer match:**\n\n- Upload original TTF fonts used by the court (if available).\n- Increase Render DPI to 200-300.\n- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
 else:
     st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
+
