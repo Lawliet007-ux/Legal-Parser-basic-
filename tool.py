@@ -3,190 +3,242 @@ import fitz  # PyMuPDF
 import io
 import base64
 import os
-import math
-from PIL import Image
-import tempfile
 import html
+import tempfile
+from PIL import Image
 
 # Optional OCR
 try:
     import pytesseract
-    from pdf2image import convert_from_bytes
     OCR_AVAILABLE = True
 except Exception:
     OCR_AVAILABLE = False
 
-st.set_page_config(page_title="Legal Judgment PDF → HTML (Preserve Layout)", layout="wide")
+st.set_page_config(page_title="Legal Judgment PDF → HTML (High-fidelity)", layout="wide")
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# ---------- Helpers ----------
 
-def points_to_px(val, scale=96/72):
-    """Convert PDF points (72dpi) to CSS pixels (approx 96dpi)."""
-    return val * scale
+def to_data_url(pix):
+    """Return a PNG data URL from a PyMuPDF Pixmap."""
+    img_bytes = pix.tobytes("png")
+    b64 = base64.b64encode(img_bytes).decode('ascii')
+    return f"data:image/png;base64,{b64}"
 
 
-def extract_pages_with_pymupdf(pdf_bytes):
-    """Extract text blocks and layout info from PDF using PyMuPDF.
-    Returns list of pages where each page is dict with width,height and blocks.
-    Each block: {"bbox":(x0,y0,x1,y1), "text": str, "font_size": float (approx)}
+def extract_layout_pages(pdf_bytes, render_dpi=150):
+    """Extract page images and exact text spans (with positions and font info).
+    Returns list of pages: {width_px, height_px, img_dataurl, spans: [{x,y,w,h,text,font,size}]}
+    Coordinates are in pixels with origin at top-left matching the rendered image.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    scale = render_dpi / 72.0
     pages = []
-    for page in doc:
-        page_dict = page.get_text("dict")
-        rect = page.rect
-        page_w, page_h = rect.width, rect.height
-        blocks = []
-        for block in page_dict.get("blocks", []):
-            if block["type"] == 0:  # text block
-                bbox = block.get("bbox")
-                text = "\n".join([line.get("spans")[0].get("text") if line.get("spans") else "" for line in block.get("lines", [])])
-                # estimate font size from first span
-                font_size = None
-                try:
-                    spans = block.get("lines")[0].get("spans")
-                    if spans:
-                        font_size = spans[0].get("size")
-                except Exception:
-                    font_size = None
-                blocks.append({"bbox":bbox, "text":text, "font_size":font_size})
-        pages.append({"width": page_w, "height": page_h, "blocks": blocks})
+    for p in doc:
+        mat = fitz.Matrix(scale, scale)
+        pix = p.get_pixmap(matrix=mat, alpha=False)
+        img_url = to_data_url(pix)
+        pw, ph = pix.width, pix.height
+
+        page_dict = p.get_text("dict")
+        spans_list = []
+        # iterate blocks -> lines -> spans so we preserve exact positions
+        for block in page_dict.get('blocks', []):
+            if block.get('type') != 0:
+                continue
+            for line in block.get('lines', []):
+                for span in line.get('spans', []):
+                    bbox = span.get('bbox', [0,0,0,0])
+                    x0, y0, x1, y1 = bbox
+                    # Convert from points to rendered pixels using same scale factor
+                    x_px = x0 * scale
+                    y_px = y0 * scale
+                    w_px = max(1, (x1 - x0) * scale)
+                    h_px = max(1, (y1 - y0) * scale)
+                    text = span.get('text', '')
+                    size = span.get('size', 0)
+                    font = span.get('font', '')
+                    flags = span.get('flags', 0)
+                    spans_list.append({
+                        'x': x_px, 'y': y_px, 'w': w_px, 'h': h_px,
+                        'text': text, 'font': font, 'size': size, 'flags': flags
+                    })
+        pages.append({'width_px': pw, 'height_px': ph, 'img': img_url, 'spans': spans_list})
     doc.close()
     return pages
 
 
-def generate_html_from_pages(pages, page_scale=96/72):
-    """Generate an HTML string with absolutely positioned text blocks to mimic layout.
+def generate_high_fidelity_html(pages, overlay_opacity=0.0, include_image=True, embed_fonts=False, fonts_dict=None):
+    """Generate HTML with page images as background and absolutely positioned spans on top.
+    overlay_opacity: opacity of the image (0 = invisible image, 1 = fully visible). If image invisible, the page text overlay will be visible (selectable).
+    include_image: whether to include the original rendered image as background.
+    fonts_dict: optional dict map fontname->base64-ttf to embed via @font-face. keys should be safe font-family names.
     """
-    page_divs = []
-    for i, p in enumerate(pages):
-        w_px = points_to_px(p["width"], page_scale)
-        h_px = points_to_px(p["height"], page_scale)
-        blocks_html = []
-        for b in p["blocks"]:
-            x0, y0, x1, y1 = b["bbox"]
-            left = points_to_px(x0, page_scale)
-            top = points_to_px(y0, page_scale)
-            width = max(1, points_to_px(x1 - x0, page_scale))
-            height = max(1, points_to_px(y1 - y0, page_scale))
-            # sanitize text for HTML
-            content = html.escape(b["text"]).replace('\n', '<br/>')
-            font_size_px = ''
-            if b.get("font_size"):
-                # convert font size points -> px
-                font_size_px = f"font-size: {points_to_px(b['font_size'], page_scale):.1f}px;"
-            div = f'<div class="text-block" style="position:absolute; left:{left:.1f}px; top:{top:.1f}px; width:{width:.1f}px; height:{height:.1f}px; {font_size_px}overflow-wrap:break-word;">{content}</div>'
-            blocks_html.append(div)
-        page_html = f'<div class="pdf-page" style="position:relative; width:{w_px:.1f}px; height:{h_px:.1f}px; margin:20px auto; box-shadow:0 0 0.5rem rgba(0,0,0,0.1); background:white;">' + "\n".join(blocks_html) + '</div>'
-        page_divs.append(page_html)
+    pages_html = []
 
-    css = """
-    <style>
-    body { background:#f0f0f0; font-family: Georgia, 'Times New Roman', serif; }
-    .pdf-container { display:flex; flex-direction:column; align-items:center; }
-    .pdf-page { border:1px solid #ddd; }
-    .text-block { white-space: pre-wrap; }
-    </style>
-    """
+    # optional @font-face blocks
+    font_faces = []
+    if fonts_dict:
+        for fname, b64 in fonts_dict.items():
+            safe_name = fname.replace(' ', '_')
+            font_faces.append("""
+@font-face {
+  font-family: '%s';
+  src: url(data:font/ttf;charset=utf-8;base64,%s) format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+""" % (safe_name, b64))
+    font_css = "
+".join(font_faces)
+
+    for idx, p in enumerate(pages):
+        # container matches rendered image size
+        w = p['width_px']
+        h = p['height_px']
+        bg_style = ''
+        if include_image:
+            bg_style = f"background-image:url('{p['img']}'); background-size: {w}px {h}px; background-repeat:no-repeat;"
+        # Build spans HTML. We'll keep each span in its own div/span with no wrapping to preserve exact placement.
+        spans_html = []
+        for s in p['spans']:
+            if not s['text']:
+                continue
+            # sanitize text but keep spaces
+            content = html.escape(s['text']).replace('\n', '<br/>')
+            # font-size scaled to px: span size is in points; rendered px size = size * (render_dpi / 72)
+            # However earlier we already converted bbox coords to px using same scale; we'll compute font-size in px similarly
+            font_px = s['size'] * (p['height_px'] / (p['height_px'] / (s['h'] / (s['size'] if s['size'] else 1))) ) if False else s['size'] * (p['height_px'] / p['height_px'])
+            # Simpler: convert size in points to px using 96/72 as default approximation then scale to rendered DPI
+            # But we don't have original render_dpi here; assume px size is size * (96/72) * (p_width_px / p_width_points) - complicated.
+            # Use a practical approach: set font-size to h*0.9 to fit inside bbox height
+            font_px = max(8, s['h'] * 0.9)
+
+            # font-family fallback: try to use the font name directly; user can supply font upload to map names
+            font_family = s['font'].split('+')[-1].split('-')[0]
+            font_family_css = f"font-family: '{font_family}', serif;"
+
+            span_style = f"position:absolute; left:{s['x']:.2f}px; top:{s['y']:.2f}px; width:{s['w']:.2f}px; height:{s['h']:.2f}px; font-size:{font_px:.2f}px; line-height:1; {font_family_css} white-space:pre; overflow:hidden;"
+            # make the text background transparent so image shows through if desired
+            span_html = f"<div class=\"text-span\" style=\"{span_style}\">{content}</div>"
+            spans_html.append(span_html)
+
+        page_html = f"""
+<div class='pdf-page' style='position:relative; width:{w}px; height:{h}px; {bg_style}'>
+{''.join(spans_html)}
+</div>
+"""
+        pages_html.append(page_html)
+
+    css = f"""
+<style>
+{font_css}
+body {{ background:#ececec; margin:0; font-family: Georgia, 'Times New Roman', serif; }}
+.viewer {{ display:flex; flex-direction:column; align-items:center; gap:20px; padding:20px; }}
+.pdf-page {{ box-shadow:0 6px 18px rgba(0,0,0,0.12); background-color:white; }}
+.text-span {{ color: rgba(0,0,0,0.98); }}
+</style>
+"""
 
     html_full = f"""
-    <!doctype html>
-    <html>
-    <head>
-    <meta charset=\"utf-8\" />
-    <title>Converted Judgment</title>
-    {css}
-    </head>
-    <body>
-    <div class="pdf-container">
-    {"".join(page_divs)}
-    </div>
-    </body>
-    </html>
-    """
+<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'/>
+<title>High-fidelity Judgment Export</title>
+{css}
+</head>
+<body>
+<div class='viewer'>
+{''.join(pages_html)}
+</div>
+</body>
+</html>
+"""
     return html_full
 
+# ---------- Streamlit UI ----------
 
-def ocr_pages(pdf_bytes):
-    """Fallback OCR: convert pages to images and run pytesseract to get text.
-    Returns list of pages each as simple text blob.
-    """
-    images = convert_from_bytes(pdf_bytes)
-    pages = []
-    for img in images:
-        text = pytesseract.image_to_string(img, lang='eng')
-        pages.append({"width": img.width, "height": img.height, "blocks": [{"bbox": (0,0,img.width,img.height), "text": text, "font_size": None}]})
-    return pages
+st.title("High-fidelity Legal Judgment PDF → HTML (Carbon-copy approach)")
+st.markdown("""
+This version aims to produce a **near-carbon copy** of the input PDF by: 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
+- Rendering each PDF page as a high-resolution image.
+- Overlaying the *exact* text spans (positions, approximate font-sizes) over that image so the result looks identical while keeping selectable/searchable text.
 
-st.title("Legal Judgment PDF → HTML (Preserve layout & numbering)")
-st.markdown(
-    """
-    Upload a judgement PDF and this tool will attempt to reproduce the PDF's text and structure in an HTML page.
+**Tips:**
+- Increase the DPI slider for higher-fidelity images (at cost of memory / time).
+- If you have original fonts (.ttf), upload them to embed for better match.
+- For scanned PDFs, enable OCR to extract word-level boxes.
+""")
 
-    **Key points:**
-    - Uses PyMuPDF to extract text *with layout blocks* and repositions them in HTML to resemble the original.
-    - Optional OCR fallback using pytesseract/pdf2image for scanned PDFs (requires external Tesseract & poppler).
-    - Preview HTML in the app and download the final HTML file.
-    """
-)
+uploaded = st.file_uploader("Upload judgment PDF", type=["pdf"] )
+render_dpi = st.slider("Render DPI (increase for higher fidelity)", min_value=72, max_value=300, value=150, step=10)
+include_image = st.checkbox("Include original rendered page images (recommended)", value=True)
+use_ocr = st.checkbox("Force OCR (if PDF is scanned)", value=False)
 
-uploaded = st.file_uploader("Upload PDF file", type=["pdf"])
-use_ocr = st.checkbox("Use OCR fallback for scanned pages (requires pytesseract + poppler)", value=False)
+# optional font upload
+uploaded_fonts = st.file_uploader("Upload .ttf font files (optional, multiple)", type=["ttf"], accept_multiple_files=True)
 
 if uploaded is not None:
     pdf_bytes = uploaded.read()
-    st.info(f"File uploaded: {uploaded.name} — {len(pdf_bytes):,} bytes")
+    st.info(f"Processing {uploaded.name} — {len(pdf_bytes):,} bytes")
 
-    with st.spinner("Extracting layout from PDF using PyMuPDF..."):
+    with st.spinner("Extracting pages and layout (PyMuPDF)..."):
         try:
-            pages = extract_pages_with_pymupdf(pdf_bytes)
-            # If no text blocks found and OCR available and user selected OCR, fallback
-            total_blocks = sum(len(p['blocks']) for p in pages)
-            if total_blocks == 0 and use_ocr and OCR_AVAILABLE:
-                st.warning("No text blocks found — trying OCR fallback on all pages.")
-                pages = ocr_pages(pdf_bytes)
-            elif total_blocks == 0 and use_ocr and not OCR_AVAILABLE:
-                st.error("OCR requested but pytesseract/pdf2image not available in environment.")
+            pages = extract_layout_pages(pdf_bytes, render_dpi=render_dpi)
+            total_spans = sum(len(p['spans']) for p in pages)
+            if total_spans == 0 and (use_ocr or (not pages) ) and OCR_AVAILABLE:
+                st.warning("No text spans found — falling back to OCR per page.")
+                # do simple OCR per rendered image
+                ocr_pages = []
+                for p in pages:
+                    # decode image from data url
+                    header, b64 = p['img'].split(',', 1)
+                    img_bytes = base64.b64decode(b64)
+                    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+                    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+                    spans = []
+                    n = len(data['text'])
+                    for i in range(n):
+                        txt = data['text'][i]
+                        if not txt.strip():
+                            continue
+                        x = data['left'][i]
+                        y = data['top'][i]
+                        w = data['width'][i]
+                        h = data['height'][i]
+                        spans.append({'x': x, 'y': y, 'w': w, 'h': h, 'text': txt, 'font': 'OCR', 'size': h})
+                    ocr_pages.append({'width_px': p['width_px'], 'height_px': p['height_px'], 'img': p['img'], 'spans': spans})
+                pages = ocr_pages
+            elif total_spans == 0 and use_ocr and not OCR_AVAILABLE:
+                st.error('OCR requested but pytesseract not available in this environment.')
         except Exception as e:
-            st.error(f"Error extracting PDF: {e}")
+            st.error(f"Error while extracting layout: {e}")
             st.stop()
 
+    # prepare fonts dict
+    fonts_dict = {}
+    if uploaded_fonts:
+        for f in uploaded_fonts:
+            name = os.path.splitext(f.name)[0]
+            b64 = base64.b64encode(f.read()).decode('ascii')
+            fonts_dict[name] = b64
+
     # Generate HTML
-    html_out = generate_html_from_pages(pages)
+    with st.spinner("Generating high-fidelity HTML..."):
+        html_out = generate_high_fidelity_html(pages, include_image=include_image, fonts_dict=fonts_dict if fonts_dict else None)
 
-    st.subheader("HTML Preview")
-    # Display preview in a resizable iframe-like area
-    st.components.v1.html(html_out, height=800, scrolling=True)
+    st.subheader("Preview")
+    st.components.v1.html(html_out, height=900, scrolling=True)
 
-    # Download
-    st.download_button(label="Download HTML", data=html_out.encode('utf-8'), file_name=os.path.splitext(uploaded.name)[0] + ".html", mime="text/html")
-
-    # Save requirements helper
-    if st.button("Show recommended requirements.txt"):
-        reqs = """
-streamlit
-PyMuPDF
-pdf2image
-pytesseract
-pillow
-pdfplumber
-"""
-        st.code(reqs)
+    st.download_button("Download HTML", data=html_out.encode('utf-8'), file_name=os.path.splitext(uploaded.name)[0]+"_export.html", mime='text/html')
 
     st.markdown("---")
-    st.markdown(
-        "**Notes & tips:**\n\n" 
-        "- This tool tries to reproduce spatial layout by absolutely positioning text blocks extracted by PyMuPDF (get_text(\"dict\")).\n"
-        "- Perfect pixel-for-pixel reproduction requires the original fonts and advanced rendering (not covered here).\n"
-        "- For scanned/bitmap PDFs enable OCR (requires system installation of Tesseract and poppler).\n"
-        "- If you want the app tuned to a set of sample judgments (court-specific styles), upload a few representative PDFs and I can help adjust CSS/font scaling rules to match them more closely.\n"
-    )
+    st.markdown("**If you want a closer match:**
+
+- Upload original TTF fonts used by the court (if available).
+- Increase Render DPI to 200-300.
+- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
 
 else:
-    st.info("Upload a PDF to get started.")
+    st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
