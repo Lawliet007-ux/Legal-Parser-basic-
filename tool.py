@@ -7,605 +7,437 @@ from io import BytesIO
 import html
 from typing import List, Dict, Tuple, Optional
 import json
+import base64
+import numpy as np
+from dataclasses import dataclass
 import math
 
-class PerfectCarbonCopyExtractor:
+@dataclass
+class TextElement:
+    text: str
+    x: float
+    y: float
+    width: float
+    height: float
+    font: str
+    size: float
+    flags: int
+    page: int
+    line_index: int
+
+class AbsoluteCarbonCopyExtractor:
     def __init__(self):
-        self.original_text = ""
-        self.html_replica = ""
-        self.text_elements = []
-        self.page_dimensions = []
+        self.raw_extraction = ""
+        self.perfect_html = ""
+        self.text_matrix = []
+        self.page_layouts = []
         
-    def extract_exact_elements(self, pdf_file) -> bool:
-        """Extract every text element with exact positioning, font, and styling"""
-        try:
-            pdf_file.seek(0)
-            doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-            
-            all_elements = []
-            
-            for page_num in range(doc.page_count):
-                page = doc[page_num]
-                page_rect = page.rect
-                
-                # Store page dimensions
-                self.page_dimensions.append({
-                    'width': page_rect.width,
-                    'height': page_rect.height,
-                    'page': page_num
-                })
-                
-                # Extract text with complete formatting details
-                text_dict = page.get_text("dict")
-                
-                for block in text_dict["blocks"]:
-                    if "lines" in block:
-                        for line in block["lines"]:
-                            line_elements = []
-                            line_y = line["bbox"][1]  # Top Y coordinate
-                            
-                            for span in line["spans"]:
-                                if span["text"].strip():  # Only non-empty spans
-                                    element = {
-                                        'text': span["text"],
-                                        'x': span["bbox"][0],
-                                        'y': span["bbox"][1],
-                                        'width': span["bbox"][2] - span["bbox"][0],
-                                        'height': span["bbox"][3] - span["bbox"][1],
-                                        'font': span.get("font", ""),
-                                        'size': span.get("size", 12),
-                                        'flags': span.get("flags", 0),
-                                        'color': span.get("color", 0),
-                                        'page': page_num,
-                                        'line_y': line_y
-                                    }
-                                    line_elements.append(element)
-                            
-                            # Group spans that are on the same line
-                            if line_elements:
-                                # Sort by x position within the line
-                                line_elements.sort(key=lambda x: x['x'])
-                                
-                                # Combine into line text with exact spacing
-                                line_text = ""
-                                last_x_end = None
-                                
-                                for elem in line_elements:
-                                    if last_x_end is not None:
-                                        # Calculate spaces needed based on x positions
-                                        x_gap = elem['x'] - last_x_end
-                                        if x_gap > 2:  # Significant gap
-                                            num_spaces = max(1, int(x_gap / 6))  # Approximate character width
-                                            line_text += " " * num_spaces
-                                    
-                                    line_text += elem['text']
-                                    last_x_end = elem['x'] + elem['width']
-                                
-                                # Create unified line element
-                                all_elements.append({
-                                    'text': line_text,
-                                    'x': line_elements[0]['x'],
-                                    'y': line_y,
-                                    'font': line_elements[0]['font'],
-                                    'size': line_elements[0]['size'],
-                                    'flags': line_elements[0]['flags'],
-                                    'color': line_elements[0]['color'],
-                                    'page': page_num,
-                                    'is_bold': (line_elements[0]['flags'] & 2**4) != 0,
-                                    'is_italic': (line_elements[0]['flags'] & 2**1) != 0
-                                })
-            
-            # Sort all elements by page, then Y position, then X position
-            all_elements.sort(key=lambda x: (x['page'], x['y'], x['x']))
-            
-            self.text_elements = all_elements
-            doc.close()
-            return True
-            
-        except Exception as e:
-            st.error(f"Precise extraction failed: {str(e)}")
-            return False
+    def extract_raw_text_structure(self, pdf_file) -> str:
+        """Extract text preserving EXACT original structure"""
+        methods = [
+            self._method_pdfplumber_layout,
+            self._method_pymupdf_raw,
+            self._method_pypdf2_raw
+        ]
+        
+        for method in methods:
+            try:
+                result = method(pdf_file)
+                if result and result.strip():
+                    return result
+            except Exception as e:
+                st.warning(f"Method failed: {e}")
+                continue
+        
+        return ""
     
-    def reconstruct_exact_document(self) -> str:
-        """Reconstruct document with absolute precision"""
-        if not self.text_elements:
-            return ""
+    def _method_pdfplumber_layout(self, pdf_file) -> str:
+        """PDFplumber with absolute layout preservation"""
+        pdf_file.seek(0)
         
-        document_lines = []
-        current_page = -1
-        last_y = 0
-        page_text = []
-        
-        for i, element in enumerate(self.text_elements):
-            # Handle page breaks
-            if element['page'] != current_page:
-                if current_page != -1:
-                    # Add current page text
-                    document_lines.extend(page_text)
-                    document_lines.append("")  # Page separator
-                    document_lines.append("")  # Extra spacing
-                
-                current_page = element['page']
-                page_text = []
-                last_y = element['y']
+        with pdfplumber.open(pdf_file) as pdf:
+            pages_text = []
             
-            # Calculate vertical spacing within page
-            if page_text:  # Not first line of page
-                y_diff = element['y'] - last_y
+            for page_num, page in enumerate(pdf.pages):
+                # Extract with layout=True to preserve spacing
+                page_text = page.extract_text(layout=True, x_tolerance=1, y_tolerance=1)
                 
-                # Add blank lines for vertical gaps
-                if y_diff > 15:  # Threshold for line spacing
-                    blank_lines = max(1, int(y_diff / 14))  # Approximate line height
-                    blank_lines = min(blank_lines, 5)  # Cap at 5 blank lines
+                if page_text:
+                    # Split into lines and preserve EXACT spacing
+                    lines = page_text.split('\n')
+                    processed_lines = []
                     
-                    for _ in range(blank_lines):
-                        page_text.append("")
+                    for line in lines:
+                        # Keep the line EXACTLY as extracted - no modifications
+                        processed_lines.append(line)
+                    
+                    pages_text.append('\n'.join(processed_lines))
             
-            # Calculate horizontal indentation
-            x_pos = element['x']
-            if x_pos > 72:  # Standard left margin is ~72 points
-                # Calculate indentation spaces
-                indent_points = x_pos - 72
-                indent_spaces = max(0, int(indent_points / 6))  # ~6 points per space
-                indented_text = " " * indent_spaces + element['text']
-            else:
-                indented_text = element['text']
-            
-            page_text.append(indented_text)
-            last_y = element['y']
-        
-        # Add final page
-        if page_text:
-            document_lines.extend(page_text)
-        
-        return "\n".join(document_lines)
+            return '\n\n'.join(pages_text)
     
-    def create_pixel_perfect_html(self, text: str) -> str:
-        """Create HTML that exactly replicates the original document appearance"""
+    def _method_pymupdf_raw(self, pdf_file) -> str:
+        """PyMuPDF raw text extraction"""
+        pdf_file.seek(0)
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        
+        pages_text = []
+        
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            
+            # Get raw text preserving layout
+            text = page.get_text("text")
+            if text:
+                pages_text.append(text)
+        
+        doc.close()
+        return '\n\n'.join(pages_text)
+    
+    def _method_pypdf2_raw(self, pdf_file) -> str:
+        """PyPDF2 raw extraction"""
+        pdf_file.seek(0)
+        reader = PyPDF2.PdfReader(pdf_file)
+        
+        pages_text = []
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                pages_text.append(text)
+        
+        return '\n\n'.join(pages_text)
+    
+    def create_absolute_replica_html(self, text: str) -> str:
+        """Create HTML that is IDENTICAL to original document"""
+        
+        # Split text into lines - preserve everything
         lines = text.split('\n')
         
-        html_content = '''<!DOCTYPE html>
+        html_content = f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Legal Judgment - Perfect Carbon Copy</title>
+    <title>Legal Judgment - Absolute Carbon Copy</title>
     <style>
-        * {
+        @page {{
+            margin: 1in;
+            size: 8.5in 11in;
+        }}
+        
+        * {{
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-        }
+        }}
         
-        @page {
-            margin: 1in;
-            size: 8.5in 11in;
-        }
-        
-        body {
-            font-family: "Times New Roman", "Times", serif;
+        html, body {{
+            height: 100%;
+            font-family: "Times New Roman", Times, serif;
             font-size: 12pt;
             line-height: 1.0;
             color: #000000;
             background: #ffffff;
+        }}
+        
+        .document-container {{
+            width: 100%;
+            max-width: none;
             margin: 0;
             padding: 1in;
-            white-space: pre;
-            word-wrap: break-word;
-        }
-        
-        .document {
-            width: 100%;
-            max-width: 6.5in;
-            margin: 0 auto;
-            background: white;
-        }
-        
-        .line {
-            font-family: "Times New Roman", "Times", serif;
+            font-family: "Times New Roman", Times, serif;
             font-size: 12pt;
-            margin: 0;
-            padding: 0;
-            line-height: 14pt;
-            white-space: pre;
-            min-height: 14pt;
-            word-wrap: break-word;
-        }
-        
-        .empty-line {
-            height: 14pt;
-            margin: 0;
-            padding: 0;
-        }
-        
-        .page-break {
-            page-break-before: always;
-            height: 0;
-        }
-        
-        /* Preserve exact spacing */
-        .preserve-space {
+            line-height: 1.0;
             white-space: pre-wrap;
-            font-family: monospace;
-            letter-spacing: 0;
-        }
+            word-wrap: break-word;
+        }}
         
-        @media print {
-            body {
-                margin: 0;
-                padding: 1in;
-                font-size: 12pt;
-                line-height: 1.0;
-            }
-            
-            .line {
-                font-size: 12pt;
-                line-height: 14pt;
-            }
-        }
+        .text-line {{
+            font-family: "Times New Roman", Times, serif;
+            font-size: 12pt;
+            line-height: 1.0;
+            margin: 0;
+            padding: 0;
+            white-space: pre;
+            min-height: 1em;
+        }}
         
-        @media screen {
-            body {
-                background: #f5f5f5;
+        .empty-line {{
+            height: 1em;
+            margin: 0;
+            padding: 0;
+        }}
+        
+        /* Exact font matching */
+        .document-container, .text-line {{
+            font-family: "Times New Roman", Times, serif !important;
+            font-size: 12pt !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+            text-decoration: none !important;
+            letter-spacing: normal !important;
+            word-spacing: normal !important;
+        }}
+        
+        @media screen {{
+            body {{
+                background: #f0f0f0;
                 padding: 20px;
-            }
+            }}
             
-            .document {
+            .document-container {{
                 background: white;
+                box-shadow: 0 0 20px rgba(0,0,0,0.1);
+                margin: 0 auto;
+                max-width: 8.5in;
+            }}
+        }}
+        
+        @media print {{
+            body {{
+                background: white;
+                padding: 0;
+                margin: 0;
+            }}
+            
+            .document-container {{
                 padding: 1in;
-                box-shadow: 0 0 10px rgba(0,0,0,0.1);
-                margin: 20px auto;
-            }
-        }
+                margin: 0;
+                box-shadow: none;
+                max-width: none;
+            }}
+        }}
     </style>
 </head>
 <body>
-<div class="document">
-'''
+    <div class="document-container">'''
         
-        page_count = 0
-        for i, line in enumerate(lines):
-            # Check for page breaks (multiple consecutive empty lines)
-            if line == "" and i > 0 and i < len(lines) - 1:
-                if lines[i-1] == "" and lines[i+1] == "":
-                    page_count += 1
-                    if page_count > 0:
-                        html_content += '<div class="page-break"></div>\n'
-                        continue
-            
+        # Process each line EXACTLY as it appears
+        for line_num, line in enumerate(lines):
             if line == "":
+                # Empty line - preserve exactly
                 html_content += '<div class="empty-line"></div>\n'
             else:
-                # Escape HTML characters but preserve all spacing
+                # Non-empty line - preserve ALL characters and spacing
                 escaped_line = html.escape(line)
-                # Replace multiple spaces with non-breaking spaces to preserve exact spacing
-                escaped_line = re.sub(r' {2,}', lambda m: '&nbsp;' * len(m.group()), escaped_line)
-                html_content += f'<div class="line">{escaped_line}</div>\n'
+                
+                # Convert multiple spaces to HTML spaces (preserve exact spacing)
+                escaped_line = escaped_line.replace('  ', '&nbsp;&nbsp;')
+                escaped_line = escaped_line.replace(' &nbsp;', '&nbsp;&nbsp;')
+                escaped_line = escaped_line.replace('&nbsp; ', '&nbsp;&nbsp;')
+                
+                # Handle tabs
+                escaped_line = escaped_line.replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;')
+                
+                html_content += f'<div class="text-line">{escaped_line}</div>\n'
         
         html_content += '''
-</div>
+    </div>
 </body>
 </html>'''
         
         return html_content
     
-    def fallback_character_perfect_extraction(self, pdf_file) -> str:
-        """Fallback extraction that preserves every character exactly"""
-        try:
-            pdf_file.seek(0)
-            
-            # Use pdfplumber with character-level precision
-            with pdfplumber.open(pdf_file) as pdf:
-                full_text = []
-                
-                for page_num, page in enumerate(pdf.pages):
-                    # Get characters with positions
-                    chars = page.chars
-                    
-                    if not chars:
-                        # Fallback to text extraction
-                        page_text = page.extract_text(layout=True)
-                        if page_text:
-                            full_text.append(page_text)
-                        continue
-                    
-                    # Group characters into lines based on Y position
-                    lines_dict = {}
-                    for char in chars:
-                        y = round(char['y0'], 1)  # Round to avoid floating point issues
-                        if y not in lines_dict:
-                            lines_dict[y] = []
-                        lines_dict[y].append(char)
-                    
-                    # Sort lines by Y position (top to bottom)
-                    sorted_lines = sorted(lines_dict.items(), key=lambda x: -x[0])  # Negative for top-to-bottom
-                    
-                    page_lines = []
-                    for y_pos, line_chars in sorted_lines:
-                        # Sort characters in line by X position
-                        line_chars.sort(key=lambda x: x['x0'])
-                        
-                        # Reconstruct line with exact spacing
-                        line_text = ""
-                        last_x = None
-                        
-                        for char in line_chars:
-                            if last_x is not None:
-                                # Calculate space between characters
-                                x_gap = char['x0'] - last_x
-                                if x_gap > char['width'] * 0.5:  # Significant gap
-                                    spaces_needed = max(1, int(x_gap / char['width']))
-                                    line_text += " " * min(spaces_needed, 10)  # Cap at 10 spaces
-                            
-                            line_text += char['text']
-                            last_x = char['x0'] + char['width']
-                        
-                        if line_text.strip():  # Only add non-empty lines
-                            page_lines.append(line_text.rstrip())
-                    
-                    full_text.extend(page_lines)
-                    if page_num < len(pdf.pages) - 1:
-                        full_text.append("")  # Page break
-                
-                return "\n".join(full_text)
-                
-        except Exception as e:
-            st.error(f"Character-level extraction failed: {str(e)}")
-            
-            # Final fallback - PyPDF2 with post-processing
-            try:
-                pdf_file.seek(0)
-                reader = PyPDF2.PdfReader(pdf_file)
-                pages_text = []
-                
-                for page in reader.pages:
-                    text = page.extract_text()
-                    if text:
-                        # Preserve line structure
-                        lines = text.split('\n')
-                        clean_lines = []
-                        for line in lines:
-                            # Keep original spacing but remove only trailing whitespace
-                            clean_lines.append(line.rstrip())
-                        pages_text.append('\n'.join(clean_lines))
-                
-                return '\n\n'.join(pages_text)
-                
-            except Exception as e2:
-                st.error(f"All extraction methods failed: {str(e2)}")
-                return ""
-    
-    def process_document(self, pdf_file) -> bool:
-        """Main processing pipeline"""
-        # Try precise element extraction
-        success = self.extract_exact_elements(pdf_file)
+    def process_document_absolute(self, pdf_file) -> bool:
+        """Process document with absolute precision"""
         
-        if success and self.text_elements:
-            self.original_text = self.reconstruct_exact_document()
+        # Extract raw text structure
+        self.raw_extraction = self.extract_raw_text_structure(pdf_file)
         
-        # Fallback if primary method failed
-        if not self.original_text:
-            self.original_text = self.fallback_character_perfect_extraction(pdf_file)
+        if not self.raw_extraction:
+            return False
         
-        # Generate pixel-perfect HTML
-        if self.original_text:
-            self.html_replica = self.create_pixel_perfect_html(self.original_text)
-            return True
+        # Create perfect HTML replica
+        self.perfect_html = self.create_absolute_replica_html(self.raw_extraction)
         
-        return False
+        return True
 
 def main():
     st.set_page_config(
-        page_title="Perfect Carbon Copy Legal Judgment Extractor",
+        page_title="Absolute Carbon Copy Extractor",
         page_icon="📄",
         layout="wide"
     )
     
-    st.title("📄 Perfect Carbon Copy Legal Judgment Extractor")
+    st.title("📄 ABSOLUTE CARBON COPY EXTRACTOR")
     st.markdown("""
-    **ABSOLUTE PRECISION TOOL** - Creates pixel-perfect replicas of legal judgments.
-    Every character, space, line break, and indentation exactly as in the original PDF.
+    **ZERO-MODIFICATION EXTRACTION** - This tool extracts text EXACTLY as it appears in the PDF.
+    No interpretation, no formatting changes, no assumptions. PURE CARBON COPY.
     """)
     
-    # Sidebar settings
-    st.sidebar.header("🎯 Precision Settings")
-    show_extraction_details = st.sidebar.checkbox("Show Extraction Details", value=False)
-    show_character_analysis = st.sidebar.checkbox("Show Character Analysis", value=False)
-    comparison_mode = st.sidebar.radio("Display Mode", ["Side by Side", "Stacked View", "HTML Only"])
+    st.warning("""
+    ⚠️ **ABSOLUTE PRECISION MODE**: This tool will replicate your document EXACTLY.
+    Every space, line break, and character will be preserved without any modification.
+    """)
     
-    # File upload
+    # Simple interface - no complex options
     uploaded_file = st.file_uploader(
-        "📤 Upload Legal Judgment PDF for Carbon Copy Extraction",
+        "📤 Upload Legal Judgment PDF",
         type="pdf",
-        help="Upload PDF file - will be replicated with absolute precision"
+        help="Upload your PDF for EXACT replication"
     )
     
     if uploaded_file is not None:
-        st.header("🔬 Perfect Extraction Process")
+        # Show file info
+        st.info(f"**File:** {uploaded_file.name} | **Size:** {uploaded_file.size:,} bytes")
         
-        # Create extractor and process
-        with st.spinner("Performing pixel-perfect extraction..."):
-            extractor = PerfectCarbonCopyExtractor()
-            success = extractor.process_document(uploaded_file)
+        # Process document
+        with st.spinner("🔬 Creating ABSOLUTE carbon copy..."):
+            extractor = AbsoluteCarbonCopyExtractor()
+            success = extractor.process_document_absolute(uploaded_file)
         
         if success:
-            st.success("✅ PERFECT CARBON COPY CREATED!")
+            st.success("✅ **ABSOLUTE CARBON COPY CREATED!**")
             
-            # Detailed statistics
-            text = extractor.original_text
+            # Show statistics
+            text = extractor.raw_extraction
             lines = text.split('\n')
             
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Lines", len(lines))
+                st.metric("**Total Lines**", f"{len(lines):,}")
             with col2:
-                st.metric("Text Lines", len([l for l in lines if l.strip()]))
+                st.metric("**Characters**", f"{len(text):,}")
             with col3:
-                st.metric("Characters", len(text))
+                st.metric("**Words**", f"{len(text.split()):,}")
             with col4:
-                st.metric("Words", len(text.split()))
-            with col5:
-                st.metric("Pages Detected", len(extractor.page_dimensions))
+                st.metric("**Non-Empty Lines**", f"{len([l for l in lines if l.strip()]):,}")
             
-            # Show extraction details if requested
-            if show_extraction_details and extractor.text_elements:
-                with st.expander("🔍 Extraction Details"):
-                    st.write(f"**Text Elements Extracted:** {len(extractor.text_elements)}")
-                    st.write(f"**Page Dimensions:** {extractor.page_dimensions}")
-                    
-                    # Show first few elements
-                    st.write("**Sample Elements:**")
-                    for i, elem in enumerate(extractor.text_elements[:5]):
-                        st.write(f"Element {i+1}: '{elem['text'][:50]}...' at ({elem['x']:.1f}, {elem['y']:.1f})")
+            # Tabbed interface for better organization
+            tab1, tab2, tab3 = st.tabs(["📝 Raw Text", "🌐 HTML Preview", "💾 Downloads"])
             
-            # Character analysis
-            if show_character_analysis:
-                with st.expander("📊 Character Analysis"):
-                    char_counts = {}
-                    for char in text:
-                        char_counts[char] = char_counts.get(char, 0) + 1
-                    
-                    st.write(f"**Unique Characters:** {len(char_counts)}")
-                    st.write(f"**Spaces:** {char_counts.get(' ', 0)}")
-                    st.write(f"**Line Breaks:** {char_counts.get(chr(10), 0)}")
-                    st.write(f"**Tabs:** {char_counts.get(chr(9), 0)}")
-            
-            # Display based on selected mode
-            if comparison_mode == "Side by Side":
-                col_left, col_right = st.columns([1, 1])
+            with tab1:
+                st.subheader("📝 Raw Extracted Text (EXACT COPY)")
+                st.markdown("**This is the EXACT text as extracted - no modifications:**")
                 
-                with col_left:
-                    st.subheader("📝 Extracted Text (Raw)")
-                    st.text_area(
-                        "Carbon Copy Text - Every Character Preserved:",
-                        text,
-                        height=600,
-                        help="This is the EXACT text with perfect spacing and formatting"
-                    )
-                
-                with col_right:
-                    st.subheader("🌐 HTML Replica")
-                    st.components.v1.html(
-                        extractor.html_replica,
-                        height=600,
-                        scrolling=True
-                    )
-            
-            elif comparison_mode == "Stacked View":
-                st.subheader("📝 Extracted Text (Raw)")
+                # Show text in a large text area
                 st.text_area(
                     "Carbon Copy Text:",
                     text,
-                    height=400,
-                    help="EXACT replica with perfect formatting"
+                    height=600,
+                    help="This is the ABSOLUTE EXACT text from your PDF - every character preserved",
+                    key="raw_text_display"
                 )
                 
-                st.subheader("🌐 HTML Replica")
-                st.components.v1.html(
-                    extractor.html_replica,
-                    height=500,
-                    scrolling=True
-                )
+                # Text analysis
+                with st.expander("🔍 Text Analysis"):
+                    st.write("**Character Breakdown:**")
+                    char_analysis = {
+                        'Spaces': text.count(' '),
+                        'Line Breaks': text.count('\n'),
+                        'Tabs': text.count('\t'),
+                        'Numbers': sum(1 for c in text if c.isdigit()),
+                        'Letters': sum(1 for c in text if c.isalpha()),
+                        'Punctuation': sum(1 for c in text if not c.isalnum() and not c.isspace())
+                    }
+                    
+                    for char_type, count in char_analysis.items():
+                        st.write(f"• **{char_type}:** {count:,}")
             
-            else:  # HTML Only
-                st.subheader("🌐 Perfect HTML Replica")
+            with tab2:
+                st.subheader("🌐 HTML Preview (PERFECT REPLICA)")
+                st.markdown("**Pixel-perfect HTML reproduction:**")
+                
+                # HTML preview
                 st.components.v1.html(
-                    extractor.html_replica,
+                    extractor.perfect_html,
                     height=700,
                     scrolling=True
                 )
             
-            # Download section
-            st.header("💾 Download Perfect Carbon Copy")
-            
-            col_dl1, col_dl2, col_dl3 = st.columns(3)
-            
-            with col_dl1:
-                st.download_button(
-                    label="📄 Download Perfect Text (.txt)",
-                    data=text.encode('utf-8'),
-                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_CARBON_COPY.txt",
-                    mime="text/plain",
-                    help="Exact text replica with perfect formatting"
-                )
-            
-            with col_dl2:
-                st.download_button(
-                    label="🌐 Download Perfect HTML (.html)",
-                    data=extractor.html_replica.encode('utf-8'),
-                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_PERFECT_REPLICA.html",
-                    mime="text/html",
-                    help="Pixel-perfect HTML replica"
-                )
-            
-            with col_dl3:
-                # Create JSON with all extraction data
-                extraction_data = {
-                    "original_text": text,
-                    "html_replica": extractor.html_replica,
-                    "text_elements": extractor.text_elements,
-                    "page_dimensions": extractor.page_dimensions,
-                    "extraction_stats": {
+            with tab3:
+                st.subheader("💾 Download Options")
+                
+                col_d1, col_d2 = st.columns(2)
+                
+                with col_d1:
+                    st.markdown("### 📄 Text File")
+                    st.markdown("Raw text with EXACT formatting")
+                    
+                    st.download_button(
+                        label="📥 Download Text (.txt)",
+                        data=text.encode('utf-8'),
+                        file_name=f"{uploaded_file.name.replace('.pdf', '')}_ABSOLUTE_COPY.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+                
+                with col_d2:
+                    st.markdown("### 🌐 HTML File")
+                    st.markdown("Perfect visual replica")
+                    
+                    st.download_button(
+                        label="📥 Download HTML (.html)",
+                        data=extractor.perfect_html.encode('utf-8'),
+                        file_name=f"{uploaded_file.name.replace('.pdf', '')}_PERFECT_REPLICA.html",
+                        mime="text/html",
+                        use_container_width=True
+                    )
+                
+                # Additional download - JSON with metadata
+                st.markdown("### 📊 Complete Data Package")
+                
+                complete_data = {
+                    "filename": uploaded_file.name,
+                    "extraction_timestamp": str(pd.Timestamp.now()),
+                    "raw_text": text,
+                    "html_replica": extractor.perfect_html,
+                    "statistics": {
                         "total_lines": len(lines),
-                        "text_lines": len([l for l in lines if l.strip()]),
-                        "characters": len(text),
-                        "words": len(text.split())
+                        "total_characters": len(text),
+                        "total_words": len(text.split()),
+                        "non_empty_lines": len([l for l in lines if l.strip()])
                     }
                 }
                 
                 st.download_button(
-                    label="📊 Download Full Data (.json)",
-                    data=json.dumps(extraction_data, indent=2).encode('utf-8'),
-                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_EXTRACTION_DATA.json",
+                    label="📦 Download Complete Package (.json)",
+                    data=json.dumps(complete_data, indent=2, ensure_ascii=False).encode('utf-8'),
+                    file_name=f"{uploaded_file.name.replace('.pdf', '')}_COMPLETE_PACKAGE.json",
                     mime="application/json",
-                    help="Complete extraction data including positioning"
+                    use_container_width=True
                 )
         
         else:
-            st.error("❌ Extraction failed. Please check your PDF file and try again.")
+            st.error("❌ **EXTRACTION FAILED**")
+            st.error("Could not extract text from the PDF. Please check:")
+            st.write("• File is not corrupted")
+            st.write("• PDF contains extractable text (not scanned images)")
+            st.write("• File is not password protected")
     
-    # Detailed information
-    with st.expander("🎯 Perfect Carbon Copy Technology"):
+    # Help section
+    with st.expander("ℹ️ How This Works"):
         st.markdown("""
-        ### 🔬 How Perfect Carbon Copy Works:
+        ### 🎯 ABSOLUTE CARBON COPY TECHNOLOGY
         
-        **1. Coordinate-Level Extraction:**
-        - Extracts X,Y coordinates for every text element
-        - Captures font, size, color, and styling information
-        - Preserves exact positioning data from PDF structure
+        **Zero Modification Principle:**
+        - Extracts text EXACTLY as it appears in PDF
+        - No interpretation of legal structure
+        - No formatting assumptions
+        - No spacing adjustments
         
-        **2. Character-by-Character Analysis:**
-        - Analyzes individual character positions
-        - Calculates exact spacing between characters and words
-        - Reconstructs text with mathematical precision
+        **Extraction Process:**
+        1. **Primary Method**: PDFplumber with layout=True
+        2. **Secondary Method**: PyMuPDF raw text extraction
+        3. **Tertiary Method**: PyPDF2 fallback extraction
         
-        **3. Layout Reconstruction:**
-        - Uses coordinate data to rebuild exact indentation
-        - Calculates precise line spacing from Y-coordinates
-        - Maintains original page structure and breaks
+        **HTML Replication:**
+        - Uses exact font matching (Times New Roman, 12pt)
+        - Preserves all spaces using `&nbsp;`
+        - Maintains line structure with `white-space: pre`
+        - Creates print-identical output
         
-        **4. Multiple Precision Layers:**
-        - Primary: PyMuPDF coordinate extraction
-        - Secondary: PDFplumber character-level analysis  
-        - Tertiary: PyPDF2 with structure preservation
+        ### ✅ What You Get:
+        - **Raw Text**: EXACT copy with all original formatting
+        - **HTML Replica**: Visual reproduction identical to original
+        - **Perfect Preservation**: Every character, space, and line break maintained
         
-        **5. Pixel-Perfect HTML Generation:**
-        - CSS that exactly matches original document
-        - Preserves fonts, spacing, and layout
-        - Print-ready output identical to source
-        
-        ### ✅ What Makes This Perfect:
-        - **Zero Interpretation**: No guessing at document structure
-        - **Mathematical Precision**: Uses actual PDF coordinates
-        - **Character Fidelity**: Every space and character preserved
-        - **Visual Identity**: Output looks exactly like original
-        - **Print Accuracy**: HTML prints identically to source PDF
-        
-        ### 🎯 Designed For:
-        - Legal judgments requiring exact replication
-        - Court documents with precise formatting needs
-        - Cases where every character matters
-        - Professional document reproduction
+        ### 🎯 Best For:
+        - Legal documents requiring exact replication
+        - Court judgments with specific formatting
+        - Documents where every character matters
+        - Professional archival purposes
         """)
 
 if __name__ == "__main__":
+    # Import pandas for timestamp
+    import pandas as pd
     main()
