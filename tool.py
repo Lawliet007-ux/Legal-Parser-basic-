@@ -216,7 +216,7 @@ if uploaded is not None:
             fonts_dict[name] = b64
 
     # Generate HTML
-    with st.spinner("Generating high-fidelity HTML..."):
+    with st.spinner("Generating  HTML..."):
         html_out = generate_high_fidelity_html(pages, include_image=include_image, fonts_dict=fonts_dict if fonts_dict else None)
 
     st.subheader("Preview")
@@ -228,6 +228,7 @@ if uploaded is not None:
     st.markdown("---")
     st.markdown("**If you want a closer match:**\n\n- Upload original TTF fonts used by the court (if available).\n- Increase Render DPI to 200-300.\n- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
 else:
-    st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
+    st.info("Upload a PDF to begin.")
+
 
 
