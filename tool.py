@@ -155,7 +155,7 @@ def generate_high_fidelity_html(pages, include_image=True, fonts_dict=None):
     return html_full
 
 # ---------- Streamlit UI ----------
-st.title("High-fidelity Legal Judgment PDF → HTML")
+st.title(" Judgment PDF → HTML")
 st.markdown(
     """
 
@@ -229,4 +229,5 @@ if uploaded is not None:
     st.markdown("**If you want a closer match:**\n\n- Upload original TTF fonts used by the court (if available).\n- Increase Render DPI to 200-300.\n- If you need absolute pixel perfection for a small set of courts, share sample PDFs and I'll tune CSS and font mappings specifically for those templates.")
 else:
     st.info("Upload a PDF to begin. For best results, upload a sample judgment that you're trying to match and optionally upload its fonts.")
+
 
